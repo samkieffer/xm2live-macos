@@ -780,8 +780,11 @@ def create_sample_offset_automation(track, notes, next_id):
                     for note in notes
                     if note.get('sample_offset_xm') is not None]
 
+    print(f"    DEBUG automation 9xx: {len(notes)} notes, {len(offset_notes)} avec effet 9xx")
+
     if not offset_notes:
         # Pas d'effet 9xx dans cette piste
+        print(f"    → Pas d'automation Sample Start (aucune note avec effet 9xx)")
         return next_id
 
     # Trouver le SampleStart AutomationTarget dans LoopModulators
@@ -797,6 +800,18 @@ def create_sample_offset_automation(track, notes, next_id):
         sample_start_target_id = str(next_id)
         sample_start_target.set('Id', sample_start_target_id)
         next_id += 1
+
+    # IMPORTANT: Activer IsModulated dans LoopModulators (REQUIS pour que l'automation soit visible)
+    loop_modulators = track.element.find('.//OriginalSimpler/LoopModulators')
+    if loop_modulators is not None:
+        is_modulated = loop_modulators.find('./IsModulated')
+        if is_modulated is None:
+            # Créer IsModulated si absent (doit être le PREMIER enfant de LoopModulators)
+            is_modulated = ET.Element('IsModulated')
+            is_modulated.set('Value', 'true')
+            loop_modulators.insert(0, is_modulated)  # Insérer en premier
+        else:
+            is_modulated.set('Value', 'true')
 
     # Trouver ou créer AutomationEnvelopes
     automation_envelopes = track.element.find('.//AutomationEnvelopes')
