@@ -6,11 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.3.0)
+**Status:** Production-ready (Version 2.4.0)
 
-**Recent additions (v2.1-v2.3):**
+**Recent additions (v2.1-v2.4):**
 - Volume support (default sample volume + per-note velocity)
 - Panning support (default sample panning + optional 8xx automations)
+- Sample Offset support (effect 9xx via Simpler, optional)
 - Headroom management (-12 dB) to prevent clipping
 
 ## Essential Commands
@@ -28,6 +29,9 @@ python3 xm2live.py file.xm /path/to/template.als
 
 # With panning automations (effect 8xx)
 python3 xm2live.py file.xm --pan-automation
+
+# With sample offset support (effect 9xx)
+python3 xm2live.py file.xm --sample-offset
 ```
 
 ### Batch Conversion
@@ -43,6 +47,9 @@ python3 batch_convert.py /path/to/modules --template /path/to/template.als
 
 # With panning automations
 python3 batch_convert.py /path/to/modules --pan-automation
+
+# With sample offset support
+python3 batch_convert.py /path/to/modules --sample-offset
 ```
 
 ### Development Setup
@@ -285,7 +292,11 @@ Note without 8xx → Pan returns to center (default)
 
 - **Effects:** Most effects (vibrato, arpeggio, etc.) are NOT converted - too complex
   - Exception: Effect 8xx (panning) IS supported with `--pan-automation`
-  - Effect 9xx (sample offset): NOT supported - Ableton Sampler's Sample Start parameter is not automatable (technical limitation of Ableton Live, not fixable)
+  - Exception: Effect 9xx (sample offset) IS supported with `--sample-offset` via Simpler
+    - Uses Simpler instead of Sampler (Sample Start is automatable in Simpler)
+    - LIMITATION: Simpler doesn't support ping-pong loops (auto-converted to forward)
+    - LIMITATION: Multi-sample not supported (loads only first sample)
+    - Template required: `simpler_template.xml` (65KB, included in repository)
 - **Volume envelopes (ADSR):** EXPERIMENTAL support with `--envelope` flag
   - **Fundamental incompatibility:** FT2 multi-point envelopes (up to 12 points) cannot be accurately converted to Ableton ADSR (4 parameters)
   - **Trigger vs Gate:** FT2 notes trigger indefinitely (until next note), Ableton notes have explicit duration (interpolated from note spacing)
@@ -342,6 +353,61 @@ Before making any changes, read these files in order:
 6. **DO NOT** add features not explicitly requested
 7. **DO NOT** rewrite working code without a specific bug report
 
+### 9. Sample Offset Support (v2.4.0)
+
+**Effect 9xx (Sample Offset):**
+- XM effect: 9xx sets the sample playback start offset
+- Value range: 0x00-0xFF (0-255 in decimal)
+- Usage: Acid sounds, percussive variations, evolving textures
+
+**Implementation:**
+```python
+# Detection phase (pre-scan patterns)
+instruments_with_9xx = detect_effect_9xx_per_instrument(patterns, pattern_order, file_format)
+
+# Device selection (per track)
+if instrument in instruments_with_9xx:
+    populate_track_with_simpler()  # Use Simpler (Sample Start automatable)
+else:
+    update_sampler_sample()  # Use Sampler (normal)
+
+# Automation creation (after notes)
+create_sample_offset_automation(track, notes, next_id)
+```
+
+**Key functions:**
+- `detect_effect_9xx_per_instrument()` - Scans patterns, returns set of instrument numbers with effect 9xx
+- `get_simpler_template()` - Loads simpler_template.xml (65KB), returns ElementTree copy
+- `populate_track_with_simpler()` - Configures Simpler (similar to update_sampler_sample but for Simpler device)
+- `create_sample_offset_automation()` - Creates Sample Start automation with plateau pattern (2 points per note)
+
+**XML structure (Simpler):**
+- Device: `OriginalSimpler` (not MultiSampler)
+- Sample Start: `LoopModulators/SampleStart/AutomationTarget`
+- Loop: `LoopModulators/LoopOn` (true/false only, no ping-pong mode)
+- SNAP: `Snap/Manual` (true if loop, false otherwise)
+- ADSR: `VolumeAndPan/Envelope` (same as Sampler)
+
+**Conversion:**
+- XM offset (0-255) → Ableton Sample Start (0.0-1.0)
+- Approximation: `sample_start = offset_xm / 255.0`
+- Not pixel-perfect but good enough for most use cases
+- Users can adjust manually if needed
+
+**Limitations:**
+- Ping-pong loops → forward (Simpler doesn't support ping-pong)
+- Multi-sample not supported (Simpler limitation, loads first sample only)
+- Conversion is approximative (not sample-accurate)
+
+**Parser changes:**
+- xm_parser.py: Extracts `effect_type == 0x09` → `sample_offset_xm` field
+- mod_parser.py: Extracts `effect == 0x09` → `sample_offset_xm` field
+
+**Template:**
+- `simpler_template.xml` - 65KB XML file, extracted from user-provided example
+- Must be present in script directory or current directory
+- Contains pre-configured OriginalSimpler with all necessary structure
+
 ## When Debugging
 
 Test files that demonstrate specific features:
@@ -354,7 +420,8 @@ Test files that demonstrate specific features:
 
 ## Version History Summary
 
-**v2.3.0 (Current)** - Panning support (static + optional automations)
+**v2.4.0 (Current)** - Sample Offset support (effect 9xx via Simpler, optional)
+**v2.3.0** - Panning support (static + optional automations)
 **v2.2.0** - Volume per note via velocity (Vol-Vel 35%, -12dB headroom)
 **v2.1.0** - Sample default volume support
 **v2.0.0** - Initial stable version (samples, patterns, notes, loops, tempo)

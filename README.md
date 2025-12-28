@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.4.0** (support XM + MOD + Volume + Panning + Enveloppes expérimentales)
+**Version actuelle : 2.4.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes expérimentales)
 
 ## 🎵 Fonctionnalités
 
@@ -17,6 +17,7 @@ Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MO
 - ⏱️ **Tempo** - Calcul automatique du BPM réel à partir de Speed et BPM
 - 🔊 **Volume** - Volume par défaut des samples + vélocité MIDI par note (headroom -12dB)
 - 🎧 **Panning** - Panning par défaut des samples + automations optionnelles (effet 8xx avec `--pan-automation`)
+- 🎚️ **Sample Offset** - Effet 9xx supporté via Simpler (avec `--sample-offset`, limitation ping-pong→forward)
 - 🎛️ **Enveloppes** - Conversion expérimentale FT2 → ADSR Ableton (avec `--envelope`, approximation)
 - 🎨 **Organisation** - Groupes par instrument, couleurs par canal
 - 🔊 **Monophonie** - 1 voix par sampler (comportement tracker)
@@ -87,9 +88,24 @@ python3 xm2live.py mon_fichier.xm /path/to/template.als
 # Activer les automations de panning (effet 8xx)
 python3 xm2live.py mon_fichier.xm --pan-automation
 
+# Activer l'effet 9xx (Sample Offset) via Simpler
+python3 xm2live.py mon_fichier.xm --sample-offset
+
 # Activer la conversion expérimentale des enveloppes (ADSR)
 python3 xm2live.py mon_fichier.xm --envelope
+
+# Combiner plusieurs options
+python3 xm2live.py mon_fichier.xm --pan-automation --sample-offset
 ```
+
+**⚠️ Option `--sample-offset` :**
+- Active l'effet 9xx (Sample Offset) via **Simpler** au lieu de Sampler
+- **Détection automatique :** Seuls les instruments utilisant l'effet 9xx sont convertis en Simpler
+- **Automation Sample Start :** Crée des automations pour varier le point de départ du sample
+- **Usage typique :** Sons acid, variations percussives, sons évolutifs
+- **LIMITATION :** Simpler ne supporte pas les loops ping-pong (conversion automatique en forward)
+- **Template requis :** `simpler_template.xml` doit être présent dans le répertoire du script
+- Désactivé par défaut
 
 **⚠️ Option `--envelope` (EXPÉRIMENTAL) :**
 - Convertit les enveloppes volume FT2 (multi-points) en ADSR Ableton (4 paramètres)
@@ -260,7 +276,7 @@ python3 xm2live.py fichier.xm /path/to/template.als
 
 - ❌ **Effets** : La plupart des effets tracker (vibrato, arpeggio, etc.) ne sont pas convertis
   - ✅ Exception : Effet 8xx (panning) supporté avec `--pan-automation`
-  - ❌ Effet 9xx (sample offset) : Non supporté - le paramètre Sample Start du Sampler Ableton n'est pas automatisable
+  - ✅ Exception : Effet 9xx (sample offset) supporté avec `--sample-offset` via Simpler (limitation: ping-pong→forward)
 - ⚠️ **Enveloppes de volume** : Support expérimental avec `--envelope`
   - Conversion FT2 multi-points → Ableton ADSR est une approximation
   - Incompatibilité fondamentale : 12 points FT2 vs 4 paramètres ADSR
