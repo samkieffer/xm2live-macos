@@ -359,10 +359,10 @@ def get_simpler_template():
     """Charge le template Simpler depuis simpler_template.xml
 
     Returns:
-        Element: Copie de l'élément OriginalSimpler template
+        Element: Copie de l'élément OriginalSimpler template (lxml.etree._Element)
         None si le fichier n'existe pas
     """
-    import xml.etree.ElementTree as ET
+    from lxml import etree
     from copy import deepcopy
     import os
 
@@ -383,7 +383,8 @@ def get_simpler_template():
         return None
 
     try:
-        tree = ET.parse(template_path)
+        # Utiliser lxml.etree pour compatibilité avec buildable
+        tree = etree.parse(template_path)
         root = tree.getroot()
 
         # Le root est déjà l'élément OriginalSimpler
