@@ -355,12 +355,63 @@ def detect_effect_9xx_per_instrument(patterns, pattern_order, file_format='xm'):
     return instruments_with_9xx
 
 
-def get_simpler_template():
-    """Charge le template Simpler depuis simpler_template.xml
+def regenerate_ids(element, id_mapping, next_id):
+    """Régénère récursivement tous les IDs d'un élément XML pour éviter les doublons
+
+    Args:
+        element: Element lxml à traiter
+        id_mapping: Dict pour mapper anciens → nouveaux IDs
+        next_id: Prochain ID disponible
 
     Returns:
-        Element: Copie de l'élément OriginalSimpler template (lxml.etree._Element)
-        None si le fichier n'existe pas
+        next_id mis à jour
+    """
+    # Traiter l'attribut Id de l'élément actuel
+    if 'Id' in element.attrib:
+        old_id = element.attrib['Id']
+        if old_id not in id_mapping:
+            id_mapping[old_id] = str(next_id)
+            next_id += 1
+        element.attrib['Id'] = id_mapping[old_id]
+
+    # Traiter les références PointeeId et autres
+    if element.tag == 'PointeeId' and 'Value' in element.attrib:
+        old_value = element.attrib['Value']
+        if old_value in id_mapping:
+            element.attrib['Value'] = id_mapping[old_value]
+
+    # Traiter AutomationTarget/Id
+    if element.tag == 'AutomationTarget' and 'Id' in element.attrib:
+        old_id = element.attrib['Id']
+        if old_id not in id_mapping:
+            id_mapping[old_id] = str(next_id)
+            next_id += 1
+        element.attrib['Id'] = id_mapping[old_id]
+
+    # Traiter ModulationTarget/Id
+    if element.tag == 'ModulationTarget' and 'Id' in element.attrib:
+        old_id = element.attrib['Id']
+        if old_id not in id_mapping:
+            id_mapping[old_id] = str(next_id)
+            next_id += 1
+        element.attrib['Id'] = id_mapping[old_id]
+
+    # Traiter récursivement tous les enfants
+    for child in element:
+        next_id = regenerate_ids(child, id_mapping, next_id)
+
+    return next_id
+
+
+def get_simpler_template(next_id):
+    """Charge le template Simpler depuis simpler_template.xml
+
+    Args:
+        next_id: Prochain ID disponible pour la régénération des IDs
+
+    Returns:
+        (Element, next_id): Tuple (copie de l'élément OriginalSimpler, next_id mis à jour)
+        (None, next_id) si le fichier n'existe pas
     """
     from lxml import etree
     from copy import deepcopy
@@ -380,23 +431,28 @@ def get_simpler_template():
 
     if template_path is None:
         print("❌ Template Simpler non trouvé (simpler_template.xml)")
-        return None
+        return None, next_id
 
     try:
         # Utiliser lxml.etree pour compatibilité avec buildable
         tree = etree.parse(template_path)
         root = tree.getroot()
 
-        # Le root est déjà l'élément OriginalSimpler
-        # On retourne une copie profonde pour éviter les modifications du template
-        return deepcopy(root)
+        # Faire une copie profonde
+        simpler_copy = deepcopy(root)
+
+        # IMPORTANT: Régénérer tous les IDs pour éviter les doublons (Pointee ID non uniques)
+        id_mapping = {}
+        next_id = regenerate_ids(simpler_copy, id_mapping, next_id)
+
+        return simpler_copy, next_id
 
     except Exception as e:
         print(f"❌ Erreur lors du chargement du template Simpler : {e}")
-        return None
+        return None, next_id
 
 
-def populate_track_with_simpler(track, sample_info, project_dir, bpm=125, speed=6, enable_envelope=False):
+def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=125, speed=6, enable_envelope=False):
     """Configure une piste avec OriginalSimpler au lieu de MultiSampler
 
     Utilisé pour les instruments qui ont l'effet 9xx (Sample Offset)
@@ -406,12 +462,13 @@ def populate_track_with_simpler(track, sample_info, project_dir, bpm=125, speed=
         track: Objet buildable.live.Track
         sample_info: Dict contenant path, relative_note, loop_start, loop_length, loop_type, volume, panning, envelope
         project_dir: Répertoire du projet
+        next_id: Prochain ID disponible (pour régénération IDs Simpler)
         bpm: BPM du module (pour conversion temps enveloppe)
         speed: Speed du module (ticks par row)
         enable_envelope: Activer la conversion enveloppe FT2 → ADSR
 
     Returns:
-        bool: True si succès, False sinon
+        next_id: next_id mis à jour après régénération des IDs
 
     Note:
         - Simpler ne supporte PAS les loops ping-pong (converti en forward)
@@ -425,17 +482,17 @@ def populate_track_with_simpler(track, sample_info, project_dir, bpm=125, speed=
     devices = track.element.find('.//DeviceChain/Devices')
     if devices is None:
         print(f"    ⚠️  Pas de DeviceChain/Devices trouvé")
-        return False
+        return next_id
 
     # Supprimer le MultiSampler existant s'il y en a un
     sampler = devices.find('./MultiSampler')
     if sampler is not None:
         devices.remove(sampler)
 
-    # Charger le template Simpler
-    simpler_template = get_simpler_template()
+    # Charger le template Simpler (avec régénération des IDs)
+    simpler_template, next_id = get_simpler_template(next_id)
     if simpler_template is None:
-        return False
+        return next_id
 
     # Ajouter le Simpler à la piste
     devices.append(simpler_template)
@@ -629,7 +686,7 @@ def populate_track_with_simpler(track, sample_info, project_dir, bpm=125, speed=
             configure_envelope_adsr(simpler, envelope_info, bpm, speed)
 
     print(f"    ✅ Simpler configuré (effet 9xx supporté)")
-    return True
+    return next_id
 
 
 def update_midi_clip_notes(track, notes):
@@ -1312,7 +1369,7 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
 
         if use_simpler:
             # Utiliser Simpler (pour effet 9xx)
-            populate_track_with_simpler(track, track_info['sample'], output_dir,
+            global_next_id = populate_track_with_simpler(track, track_info['sample'], output_dir, global_next_id,
                                        bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
         else:
             # Utiliser Sampler (normal)
