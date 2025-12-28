@@ -1428,9 +1428,8 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
     # Compteur pour l'ID du GroupTrack
     next_group_id = 10000
 
-    # Compteur global pour tous les IDs (DeviceChain, AutomationTarget, etc.)
-    # Commence à 100000 pour éviter les conflits avec le template
-    global_next_id = 100000
+    # NOTE: On réutilise global_next_id de la boucle précédente
+    # NE PAS réinitialiser ici car les Simplers ont déjà utilisé des IDs
 
     # Parcourir les instruments dans l'ordre (pour insérer les groups aux bons endroits)
     for instrument in unique_instruments:
