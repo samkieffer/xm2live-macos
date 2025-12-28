@@ -390,12 +390,16 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
             # Calculer le temps absolu (en beats)
             absolute_time = current_time + (row / 4.0)
 
+            # Extraire le sample offset si effet 9xx est présent
+            sample_offset_xm = note_event.get('sample_offset_xm')  # Déjà extrait par le parser
+
             notes_by_channel[channel].append({
                 'time': absolute_time,
                 'note': midi_note,
                 'velocity': velocity,
                 'instrument': sample_num,
-                'duration': 0  # Sera calculé
+                'duration': 0,  # Sera calculé
+                'sample_offset_xm': sample_offset_xm  # Sample offset de l'effet 9xx (0-255) ou None
             })
 
         # Avancer le temps (64 rows = 16 beats à 4 rows/beat)
@@ -419,7 +423,8 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
                 'time': note['time'],
                 'note': note['note'],
                 'velocity': note['velocity'],
-                'duration': note['duration']
+                'duration': note['duration'],
+                'sample_offset_xm': note.get('sample_offset_xm')  # Sample offset de l'effet 9xx (0-255) ou None
             })
 
     return tracks

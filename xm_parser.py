@@ -111,6 +111,7 @@ def parse_pattern_data(data, num_rows, num_channels):
                 sample_offset_xm = None
                 if effect_type == 0x09:  # Effet 9xx = Sample Offset
                     sample_offset_xm = effect_param if effect_param is not None else 0
+                    print(f"DEBUG parser: effet 9xx détecté, row={row}, channel={channel}, instrument={instrument:02X}, param={effect_param:02X}")
 
                 notes.append({
                     'row': row,
@@ -361,6 +362,11 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
                 param = note_event.get('effect_param')
                 panning_xm = param if param is not None else 128  # 0-255, 128=centre par défaut
 
+            # Extraire le sample offset si effet 9xx est présent
+            sample_offset_xm = note_event.get('sample_offset_xm')  # Déjà extrait par le parser
+            if sample_offset_xm is not None:
+                print(f"DEBUG organize: note avec 9xx trouvée, channel={channel}, instrument={instrument:02X}, offset={sample_offset_xm:02X}")
+
             # Stocker temporairement (durée sera calculée après)
             notes_by_channel[channel].append({
                 'time': absolute_time,
@@ -368,7 +374,8 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
                 'velocity': velocity,
                 'instrument': instrument,
                 'duration': 0,  # Sera calculé
-                'panning_xm': panning_xm  # Panning de l'effet 8xx (0-255) ou None
+                'panning_xm': panning_xm,  # Panning de l'effet 8xx (0-255) ou None
+                'sample_offset_xm': sample_offset_xm  # Sample offset de l'effet 9xx (0-255) ou None
             })
 
         # Avancer le temps (nombre de rows dans le pattern / 4)
@@ -397,7 +404,8 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
                 'note': note['note'],
                 'velocity': note['velocity'],
                 'duration': note['duration'],
-                'panning_xm': channel_notes[i].get('panning_xm')  # Panning de l'effet 8xx (0-255) ou None
+                'panning_xm': channel_notes[i].get('panning_xm'),  # Panning de l'effet 8xx (0-255) ou None
+                'sample_offset_xm': note.get('sample_offset_xm')  # Sample offset de l'effet 9xx (0-255) ou None
             })
 
     return tracks
