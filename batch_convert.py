@@ -53,7 +53,7 @@ def find_tracker_files(directory, recursive=True):
     return [str(f) for f in files]
 
 
-def batch_convert(directory, template_path=None, recursive=True, enable_pan_automation=False, enable_envelope=False):
+def batch_convert(directory, template_path=None, recursive=True, enable_pan_automation=False, enable_envelope=False, enable_sample_offset=False):
     """Convertit tous les fichiers tracker d'un répertoire
 
     Args:
@@ -161,7 +161,8 @@ def batch_convert(directory, template_path=None, recursive=True, enable_pan_auto
             # Convertir en spécifiant le répertoire de destination
             success = convert_xm_to_ableton(file_path, template_path, output_dir=project_dir,
                                            enable_pan_automation=enable_pan_automation,
-                                           enable_envelope=enable_envelope)
+                                           enable_envelope=enable_envelope,
+                                           enable_sample_offset=enable_sample_offset)
 
             if success:
                 success_count += 1
@@ -288,6 +289,12 @@ Exemples:
         help='Activer la conversion des enveloppes volume FT2 → ADSR. Par défaut désactivé car approximation.'
     )
 
+    parser.add_argument(
+        '--sample-offset',
+        action='store_true',
+        help='Activer l\'effet 9xx (Sample Offset) avec Simpler. LIMITATION: ping-pong → forward.'
+    )
+
     args = parser.parse_args()
 
     # Convertir
@@ -296,7 +303,8 @@ Exemples:
         template_path=args.template,
         recursive=not args.no_recursive,
         enable_pan_automation=args.pan_automation,
-        enable_envelope=args.envelope
+        enable_envelope=args.envelope,
+        enable_sample_offset=args.sample_offset
     )
 
     sys.exit(0 if success else 1)

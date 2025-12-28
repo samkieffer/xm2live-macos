@@ -155,6 +155,11 @@ def read_mod_patterns(f, num_patterns, num_channels):
                 effect = data[2] & 0x0F
                 effect_param = data[3]
 
+                # Extraire le sample offset si effet 9xx est présent
+                sample_offset_xm = None
+                if effect == 0x09:  # Effet 9xx = Sample Offset
+                    sample_offset_xm = effect_param if effect_param is not None else 0
+
                 # Ajouter les notes (si présentes)
                 if period > 0 and sample > 0:
                     midi_note = period_to_midi(period)
@@ -167,7 +172,8 @@ def read_mod_patterns(f, num_patterns, num_channels):
                             'sample': sample,
                             'effect': effect,
                             'effect_param': effect_param,
-                            'volume': 64  # Volume par défaut
+                            'volume': 64,  # Volume par défaut
+                            'sample_offset_xm': sample_offset_xm
                         })
                 # Aussi capturer les effets F (Set Speed/Tempo) même sans note
                 elif effect == 0xF and effect_param > 0:
@@ -179,7 +185,8 @@ def read_mod_patterns(f, num_patterns, num_channels):
                         'sample': 0,
                         'effect': effect,
                         'effect_param': effect_param,
-                        'volume': 64
+                        'volume': 64,
+                        'sample_offset_xm': sample_offset_xm
                     })
 
         patterns.append({

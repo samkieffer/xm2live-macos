@@ -107,6 +107,11 @@ def parse_pattern_data(data, num_rows, num_channels):
 
             # Si on a une note valide et un instrument
             if note and note > 0 and note < 97 and instrument and instrument > 0:
+                # Extraire le sample offset si effet 9xx est présent
+                sample_offset_xm = None
+                if effect_type == 0x09:  # Effet 9xx = Sample Offset
+                    sample_offset_xm = effect_param if effect_param is not None else 0
+
                 notes.append({
                     'row': row,
                     'channel': channel,
@@ -114,7 +119,8 @@ def parse_pattern_data(data, num_rows, num_channels):
                     'instrument': instrument,
                     'volume': volume if volume else 64,
                     'effect_type': effect_type,
-                    'effect_param': effect_param
+                    'effect_param': effect_param,
+                    'sample_offset_xm': sample_offset_xm
                 })
 
     return notes

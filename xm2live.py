@@ -314,6 +314,323 @@ def update_sampler_sample(track, sample_info, project_dir, template_sample_part,
 
     return True
 
+
+def detect_effect_9xx_per_instrument(patterns, pattern_order, file_format='xm'):
+    """Détecte quels instruments utilisent l'effet 9xx (Sample Offset)
+
+    Args:
+        patterns: Liste des patterns du module
+        pattern_order: Ordre de lecture des patterns
+        file_format: 'xm' ou 'mod' (pour savoir quel champ utiliser)
+
+    Returns:
+        set: Ensemble des numéros d'instruments qui utilisent l'effet 9xx
+    """
+    instruments_with_9xx = set()
+
+    # Parcourir les patterns dans l'ordre de lecture
+    for pattern_idx in pattern_order:
+        if pattern_idx >= len(patterns):
+            continue
+
+        pattern = patterns[pattern_idx]
+
+        # Parcourir les events du pattern
+        for note_event in pattern.get('data', []):
+            instrument = note_event.get('instrument')
+
+            if instrument is None:
+                continue
+
+            # Vérifier selon le format
+            if file_format == 'xm':
+                # XM : effet_type = 0x09
+                if note_event.get('effect_type') == 0x09:
+                    instruments_with_9xx.add(instrument)
+            else:  # MOD
+                # MOD : effect = 0x09
+                if note_event.get('effect') == 0x09:
+                    instruments_with_9xx.add(instrument)
+
+    return instruments_with_9xx
+
+
+def get_simpler_template():
+    """Charge le template Simpler depuis simpler_template.xml
+
+    Returns:
+        Element: Copie de l'élément OriginalSimpler template
+        None si le fichier n'existe pas
+    """
+    import xml.etree.ElementTree as ET
+    from copy import deepcopy
+    import os
+
+    # Chemins possibles pour le template
+    template_paths = [
+        "/Users/sam/xm2live_v2/simpler_template.xml",
+        "./simpler_template.xml"
+    ]
+
+    template_path = None
+    for path in template_paths:
+        if os.path.exists(path):
+            template_path = path
+            break
+
+    if template_path is None:
+        print("❌ Template Simpler non trouvé (simpler_template.xml)")
+        return None
+
+    try:
+        tree = ET.parse(template_path)
+        root = tree.getroot()
+
+        # Le root est déjà l'élément OriginalSimpler
+        # On retourne une copie profonde pour éviter les modifications du template
+        return deepcopy(root)
+
+    except Exception as e:
+        print(f"❌ Erreur lors du chargement du template Simpler : {e}")
+        return None
+
+
+def populate_track_with_simpler(track, sample_info, project_dir, bpm=125, speed=6, enable_envelope=False):
+    """Configure une piste avec OriginalSimpler au lieu de MultiSampler
+
+    Utilisé pour les instruments qui ont l'effet 9xx (Sample Offset)
+    car Sampler ne permet pas d'automatiser Sample Start.
+
+    Args:
+        track: Objet buildable.live.Track
+        sample_info: Dict contenant path, relative_note, loop_start, loop_length, loop_type, volume, panning, envelope
+        project_dir: Répertoire du projet
+        bpm: BPM du module (pour conversion temps enveloppe)
+        speed: Speed du module (ticks par row)
+        enable_envelope: Activer la conversion enveloppe FT2 → ADSR
+
+    Returns:
+        bool: True si succès, False sinon
+
+    Note:
+        - Simpler ne supporte PAS les loops ping-pong (converti en forward)
+        - Multi-sample non supporté (charge seulement le premier sample)
+        - SNAP est activé si loop, désactivé sinon
+    """
+    sample_path = sample_info['path']
+    relative_note = sample_info.get('relative_note', 0)
+
+    # Trouver le DeviceChain/Devices
+    devices = track.element.find('.//DeviceChain/Devices')
+    if devices is None:
+        print(f"    ⚠️  Pas de DeviceChain/Devices trouvé")
+        return False
+
+    # Supprimer le MultiSampler existant s'il y en a un
+    sampler = devices.find('./MultiSampler')
+    if sampler is not None:
+        devices.remove(sampler)
+
+    # Charger le template Simpler
+    simpler_template = get_simpler_template()
+    if simpler_template is None:
+        return False
+
+    # Ajouter le Simpler à la piste
+    devices.append(simpler_template)
+    simpler = simpler_template  # Référence pour la suite
+
+    # Trouver la structure Player/MultiSampleMap/SampleParts/MultiSamplePart
+    # (oui, Simpler a la même structure que Sampler pour les samples)
+    sample_part = simpler.find('.//Player/MultiSampleMap/SampleParts/MultiSamplePart')
+    if sample_part is None:
+        print(f"    ⚠️  Pas de MultiSamplePart trouvé dans le template Simpler")
+        return False
+
+    # Mettre à jour les chemins du sample
+    file_ref = sample_part.find('.//SampleRef/FileRef')
+    if file_ref is not None:
+        # Calculer le chemin relatif depuis le fichier .als
+        sample_filename = os.path.basename(sample_path)
+        rel_path_str = f"Samples/{sample_filename}"
+
+        # Mettre à jour RelativePathType (1 = relative to .als file)
+        rel_path_type_elem = file_ref.find('.//RelativePathType')
+        if rel_path_type_elem is not None:
+            rel_path_type_elem.set('Value', '1')
+
+        # Mettre à jour RelativePath
+        rel_path_elem = file_ref.find('.//RelativePath')
+        if rel_path_elem is not None:
+            rel_path_elem.set('Value', rel_path_str)
+
+        # Mettre à jour Path
+        path_elem = file_ref.find('.//Path')
+        if path_elem is not None:
+            path_elem.set('Value', os.path.abspath(sample_path))
+
+        # Mettre à jour OriginalFileSize et OriginalCrc
+        if os.path.exists(sample_path):
+            file_size = os.path.getsize(sample_path)
+            size_elem = file_ref.find('.//OriginalFileSize')
+            if size_elem is not None:
+                size_elem.set('Value', str(file_size))
+
+            with open(sample_path, 'rb') as f:
+                data = f.read()
+                crc = sum(data) % 65536
+            crc_elem = file_ref.find('.//OriginalCrc')
+            if crc_elem is not None:
+                crc_elem.set('Value', str(crc))
+
+    # Mettre à jour le nom du sample
+    name_elem = sample_part.find('.//Name')
+    if name_elem is not None:
+        sample_name = os.path.splitext(os.path.basename(sample_path))[0]
+        name_elem.set('Value', sample_name)
+
+    # Mettre à jour RootKey
+    root_key_elem = sample_part.find('.//RootKey')
+    if root_key_elem is not None:
+        root_key = 60 - relative_note
+        root_key_elem.set('Value', str(root_key))
+        if relative_note != 0:
+            print(f"    → RootKey ajustée: {root_key} (relative_note={relative_note:+d})")
+
+    # Mettre à jour Detune (finetune)
+    finetune = sample_info.get('finetune', 0)
+    if finetune != 0:
+        detune_elem = sample_part.find('.//Detune')
+        if detune_elem is not None:
+            detune_value = finetune / 2.56
+            detune_value = max(-50, min(50, detune_value))
+            detune_elem.set('Value', str(detune_value))
+            print(f"    → Detune: {detune_value:.1f} cents (finetune={finetune:+d})")
+
+    # Mettre à jour Panorama (panning par défaut du sample)
+    xm_panning = sample_info.get('panning', 128)
+    panorama_elem = sample_part.find('.//Panorama')
+    if panorama_elem is not None:
+        ableton_pan = (xm_panning - 128) / 128.0
+        ableton_pan = max(-1.0, min(1.0, ableton_pan))
+        panorama_elem.set('Value', str(ableton_pan))
+
+        if xm_panning != 128:
+            if ableton_pan < 0:
+                print(f"    → Panorama: {ableton_pan:.2f} (gauche, XM={xm_panning}/255)")
+            else:
+                print(f"    → Panorama: {ableton_pan:.2f} (droite, XM={xm_panning}/255)")
+
+    # Mettre à jour Volume du sample dans MultiSamplePart
+    # (pas le Volume global du Simpler, qui est à -12dB dans le template)
+    xm_volume = sample_info.get('volume', 64)
+    volume_elem = sample_part.find('.//Volume')
+    if volume_elem is not None:
+        # Conversion linéaire avec réduction de -12dB
+        ableton_volume = (xm_volume / 64.0) * 0.25
+        volume_elem.set('Value', str(ableton_volume))
+
+        if xm_volume != 64:
+            if ableton_volume > 0:
+                db_value = 20 * math.log10(ableton_volume)
+                print(f"    → Volume: {ableton_volume:.3f} ({db_value:.1f} dB, XM={xm_volume}/64)")
+            else:
+                print(f"    → Volume: 0.000 (-∞ dB, XM={xm_volume}/64)")
+
+    # VolumeVelScale est déjà à 35% dans le template (0.349999994)
+    # Pas besoin de le modifier
+
+    # Lire la longueur du sample WAV pour configurer les loops
+    if os.path.exists(sample_path):
+        try:
+            import wave
+            with wave.open(sample_path, 'rb') as wav:
+                num_frames = wav.getnframes()
+
+                # Mettre à jour SampleEnd
+                sample_end_elem = sample_part.find('.//SampleEnd')
+                if sample_end_elem is not None:
+                    sample_end_elem.set('Value', str(num_frames - 1))
+
+                # Mettre à jour SustainLoop End
+                sustain_loop_end = sample_part.find('.//SustainLoop/End')
+                if sustain_loop_end is not None:
+                    sustain_loop_end.set('Value', str(num_frames - 1))
+
+                # Appliquer les paramètres de boucle
+                loop_type = sample_info.get('loop_type', 0)
+
+                # Trouver LoopOn dans LoopModulators
+                loop_on_elem = simpler.find('.//LoopModulators/LoopOn/Manual')
+                snap_elem = simpler.find('.//Snap/Manual')
+
+                if loop_type > 0:  # 1=forward, 2=ping-pong
+                    # LIMITATION : Simpler ne supporte PAS ping-pong, conversion en forward
+                    loop_start = sample_info.get('loop_start', 0)
+                    loop_length = sample_info.get('loop_length', 0)
+                    loop_end = loop_start + loop_length
+
+                    # Activer la boucle dans SustainLoop
+                    sustain_loop_on = sample_part.find('.//SustainLoop/LoopOn')
+                    if sustain_loop_on is not None:
+                        sustain_loop_on.set('Value', 'true')
+
+                    # Loop start
+                    sustain_loop_start = sample_part.find('.//SustainLoop/Start')
+                    if sustain_loop_start is not None:
+                        sustain_loop_start.set('Value', str(loop_start))
+
+                    # Loop end
+                    sustain_loop_end = sample_part.find('.//SustainLoop/End')
+                    if sustain_loop_end is not None:
+                        sustain_loop_end.set('Value', str(loop_end))
+
+                    # Mode toujours Forward (1) pour Simpler
+                    sustain_loop_mode = sample_part.find('.//SustainLoop/Mode')
+                    if sustain_loop_mode is not None:
+                        sustain_loop_mode.set('Value', '1')  # 1 = Forward
+
+                    # Activer LoopOn dans LoopModulators
+                    if loop_on_elem is not None:
+                        loop_on_elem.set('Value', 'true')
+
+                    # Activer SNAP (car il y a une loop)
+                    if snap_elem is not None:
+                        snap_elem.set('Value', 'true')
+
+                    if loop_type == 2:
+                        print(f"    → Boucle: {loop_start} - {loop_end} (Ping-Pong → Forward, limitation Simpler)")
+                    else:
+                        print(f"    → Boucle: {loop_start} - {loop_end} (Forward)")
+
+                else:
+                    # Pas de loop : désactiver LoopOn et SNAP
+                    if loop_on_elem is not None:
+                        loop_on_elem.set('Value', 'false')
+                    if snap_elem is not None:
+                        snap_elem.set('Value', 'false')
+
+        except Exception as e:
+            print(f"    ⚠️  Erreur lors de la lecture du WAV: {e}")
+
+    # Paramétrer le nombre de voix à 1 (au lieu de 6 par défaut)
+    num_voices = simpler.find('.//NumVoices')
+    if num_voices is not None:
+        num_voices.set('Value', '0')  # 0 = 1 voix
+        print(f"    → Voix: 1 (monophonique)")
+
+    # Configurer l'enveloppe ADSR si activé
+    if enable_envelope:
+        envelope_info = sample_info.get('envelope')
+        if envelope_info and envelope_info.get('enabled'):
+            # Note: configure_envelope_adsr() supporte déjà Simpler
+            # Car il cherche VolumeAndPan/Envelope qui existe dans les deux devices
+            configure_envelope_adsr(simpler, envelope_info, bpm, speed)
+
+    print(f"    ✅ Simpler configuré (effet 9xx supporté)")
+    return True
+
+
 def update_midi_clip_notes(track, notes):
     """Remplace les notes dans le premier clip MIDI de la piste"""
     # Trouver le MainSequencer
@@ -383,6 +700,125 @@ def update_midi_clip_notes(track, notes):
         midi_key_elem.set('Value', str(midi_key))
 
     return True
+
+def create_sample_offset_automation(track, notes, next_id):
+    """Crée une automation de Sample Start basée sur les effets 9xx des notes
+
+    Args:
+        track: L'élément Track Ableton
+        notes: Liste des notes avec leur sample_offset_xm (0-255) ou None
+        next_id: Prochain ID disponible (pour AutomationTarget)
+
+    Returns:
+        next_id mis à jour
+
+    Note:
+        - L'effet 9xx (Sample Offset) est converti en Sample Start (0.0-1.0)
+        - Conversion approximative : offset_xm / 255.0 = sample_start
+        - Utilise le pattern plateau (2 points par note) pour éviter l'interpolation
+    """
+    # Filtrer les notes qui ont un sample offset défini
+    offset_notes = [(note['time'], note.get('sample_offset_xm'))
+                    for note in notes
+                    if note.get('sample_offset_xm') is not None]
+
+    if not offset_notes:
+        # Pas d'effet 9xx dans cette piste
+        return next_id
+
+    # Trouver le SampleStart AutomationTarget dans LoopModulators
+    # LoopModulators est dans OriginalSimpler (pas dans MultiSampler)
+    sample_start_target = track.element.find('.//OriginalSimpler/LoopModulators/SampleStart/AutomationTarget')
+    if sample_start_target is None:
+        print("    ⚠️  AutomationTarget du SampleStart non trouvé (Simpler uniquement)")
+        return next_id
+
+    sample_start_target_id = sample_start_target.get('Id')
+    if not sample_start_target_id:
+        # Créer un ID si absent
+        sample_start_target_id = str(next_id)
+        sample_start_target.set('Id', sample_start_target_id)
+        next_id += 1
+
+    # Trouver ou créer AutomationEnvelopes
+    automation_envelopes = track.element.find('.//AutomationEnvelopes')
+    if automation_envelopes is None:
+        automation_envelopes = ET.SubElement(track.element, 'AutomationEnvelopes')
+
+    envelopes_container = automation_envelopes.find('.//Envelopes')
+    if envelopes_container is None:
+        envelopes_container = ET.SubElement(automation_envelopes, 'Envelopes')
+
+    # Créer l'AutomationEnvelope
+    envelope = ET.SubElement(envelopes_container, 'AutomationEnvelope')
+    envelope.set('Id', str(next_id))
+    next_id += 1
+
+    # EnvelopeTarget pointant vers le SampleStart
+    envelope_target = ET.SubElement(envelope, 'EnvelopeTarget')
+    pointee_id = ET.SubElement(envelope_target, 'PointeeId')
+    pointee_id.set('Value', sample_start_target_id)
+
+    # Automation avec Events
+    automation = ET.SubElement(envelope, 'Automation')
+    events = ET.SubElement(automation, 'Events')
+
+    # Créer les points d'automation
+    # IMPORTANT: Point initial à temps 0 avec Sample Start = 0.0
+    event_initial = ET.SubElement(events, 'FloatEvent')
+    event_initial.set('Id', str(next_id))
+    next_id += 1
+    event_initial.set('Time', '0.0')
+    event_initial.set('Value', '0.0')
+
+    # Trier les notes par temps
+    sorted_notes = sorted(notes, key=lambda n: n['time'])
+
+    # Ajouter les points pour chaque note
+    for note in sorted_notes:
+        time = note['time']
+        duration = note.get('duration', 1.0)
+        sample_offset_xm = note.get('sample_offset_xm')
+
+        if sample_offset_xm is not None:
+            # Note avec effet 9xx : créer 2 points (plateau)
+            # Conversion : offset_xm (0-255) → sample_start (0.0-1.0)
+            sample_start = sample_offset_xm / 255.0
+            sample_start = max(0.0, min(1.0, sample_start))
+
+            # Point au début de la note
+            event_start = ET.SubElement(events, 'FloatEvent')
+            event_start.set('Id', str(next_id))
+            next_id += 1
+            event_start.set('Time', str(time))
+            event_start.set('Value', str(sample_start))
+
+            # Point à la fin de la note (maintien du plateau)
+            event_end = ET.SubElement(events, 'FloatEvent')
+            event_end.set('Id', str(next_id))
+            next_id += 1
+            event_end.set('Time', str(time + duration))
+            event_end.set('Value', str(sample_start))
+
+        else:
+            # Note SANS effet 9xx : retour à 0.0 (début du sample)
+            event_return = ET.SubElement(events, 'FloatEvent')
+            event_return.set('Id', str(next_id))
+            next_id += 1
+            event_return.set('Time', str(time))
+            event_return.set('Value', '0.0')
+
+    # Ajouter AutomationTransformViewState (requis par Ableton)
+    transform_state = ET.SubElement(automation, 'AutomationTransformViewState')
+    is_pending = ET.SubElement(transform_state, 'IsTransformPending')
+    is_pending.set('Value', 'false')
+    time_transforms = ET.SubElement(transform_state, 'TimeAndValueTransforms')
+
+    num_points = len(events.findall('FloatEvent'))
+    print(f"    → Automation Sample Start (9xx): {num_points} points")
+
+    return next_id
+
 
 def create_pan_automation(track, notes, sample_default_pan, next_id):
     """Crée une automation de panning basée sur les effets 8xx des notes
@@ -658,7 +1094,7 @@ def configure_envelope_adsr(sampler, envelope_info, bpm, speed):
     return True
 
 
-def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_automation=False, enable_envelope=False):
+def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_automation=False, enable_envelope=False, enable_sample_offset=False):
     """Convertit un fichier XM/MOD en projet Ableton en utilisant un template
 
     Args:
@@ -667,6 +1103,7 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
         output_dir: Répertoire de sortie (optionnel)
         enable_pan_automation: Activer les automations de panning (effet 8xx)
         enable_envelope: Activer la conversion des enveloppes volume (expérimental)
+        enable_sample_offset: Activer l'effet 9xx (Sample Offset) avec Simpler
     """
 
     if not os.path.exists(xm_path):
@@ -753,6 +1190,22 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
     print(f"Samples: {len(samples)}")
     print(f"Patterns: {len(patterns)}")
     print(f"{'='*60}")
+
+    # Détecter les instruments qui utilisent l'effet 9xx (Sample Offset)
+    instruments_with_9xx = set()
+    if enable_sample_offset:
+        file_format = 'mod' if is_mod else 'xm'
+        instruments_with_9xx = detect_effect_9xx_per_instrument(
+            patterns,
+            xm_info['pattern_order'],
+            file_format
+        )
+        if instruments_with_9xx:
+            inst_hex_list = [f"{i:02X}" for i in sorted(instruments_with_9xx)]
+            print(f"\n🎚️  Effet 9xx détecté sur {len(instruments_with_9xx)} instrument(s): {', '.join(inst_hex_list)}")
+            print(f"   → Ces instruments utiliseront Simpler (Sample Start automatable)")
+        else:
+            print(f"\n🎚️  Aucun effet 9xx détecté")
 
     # Organiser les pistes par canal
     tracks_data = organize_func(
@@ -851,10 +1304,25 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
         # Modifier la piste
         update_track_name(track, track_info['track_name'])
         update_track_color(track, track_info['color'])
-        # Passer toutes les infos du sample (path, loops, relative_note, etc.)
-        update_sampler_sample(track, track_info['sample'], output_dir, template_sample_part,
-                            bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
+
+        # Choisir Simpler ou Sampler selon si l'instrument utilise l'effet 9xx
+        instrument = track_info['instrument']
+        use_simpler = (enable_sample_offset and instrument in instruments_with_9xx)
+
+        if use_simpler:
+            # Utiliser Simpler (pour effet 9xx)
+            populate_track_with_simpler(track, track_info['sample'], output_dir,
+                                       bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
+        else:
+            # Utiliser Sampler (normal)
+            update_sampler_sample(track, track_info['sample'], output_dir, template_sample_part,
+                                bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
+
         update_midi_clip_notes(track, track_info['notes'])
+
+        # Créer l'automation Sample Start basée sur les effets 9xx (si activé et Simpler)
+        if use_simpler and enable_sample_offset:
+            global_next_id = create_sample_offset_automation(track, track_info['notes'], global_next_id)
 
         # Créer l'automation de panning basée sur les effets 8xx (si activé)
         if enable_pan_automation:
@@ -1204,6 +1672,10 @@ Exemples:
     parser.add_argument('--envelope', action='store_true',
                         help='Activer la conversion des enveloppes volume FT2 → ADSR Ableton. '
                              'Par défaut désactivé car approximation simplifiée.')
+    parser.add_argument('--sample-offset', action='store_true',
+                        help='Activer l\'effet 9xx (Sample Offset) avec Simpler. '
+                             'Les instruments avec effet 9xx utiliseront Simpler au lieu de Sampler. '
+                             'LIMITATION: conversion ping-pong → forward.')
 
     args = parser.parse_args()
 
@@ -1236,7 +1708,8 @@ Exemples:
     try:
         success = convert_xm_to_ableton(xm_path, template_path,
                                         enable_pan_automation=args.pan_automation,
-                                        enable_envelope=args.envelope)
+                                        enable_envelope=args.envelope,
+                                        enable_sample_offset=args.sample_offset)
         if success:
             sys.exit(0)
         else:
