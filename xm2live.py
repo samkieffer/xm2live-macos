@@ -1375,12 +1375,176 @@ def configure_envelope_adsr(sampler, envelope_info, bpm, speed):
     return True
 
 
-def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_automation=False, enable_envelope=False, enable_sample_offset=False):
-    """Convertit un fichier XM/MOD en projet Ableton en utilisant un template
+def create_template_with_n_tracks(base_template_path, output_path, num_tracks):
+    """Crée un template Ableton avec N pistes MIDI à partir d'un template de base
+
+    Args:
+        base_template_path: Chemin du template de base (ex: template_100_tracks.als)
+        output_path: Chemin du template à créer
+        num_tracks: Nombre total de pistes désirées
+
+    Returns:
+        True si succès, False sinon
+    """
+    import gzip
+    from lxml import etree
+    from copy import deepcopy
+
+    print(f"📦 Création d'un template avec {num_tracks} pistes...")
+
+    # Charger le template de base
+    with gzip.open(base_template_path, 'rb') as f:
+        tree = etree.parse(f)
+        root = tree.getroot()
+
+    # Trouver toutes les MidiTrack existantes
+    midi_tracks = root.findall('.//MidiTrack')
+    base_num_tracks = len(midi_tracks)
+
+    if base_num_tracks >= num_tracks:
+        # Pas besoin de dupliquer, copier simplement le template
+        print(f"   Template de base a déjà {base_num_tracks} pistes (>= {num_tracks})")
+        with gzip.open(output_path, 'wb', compresslevel=9) as f:
+            f.write(etree.tostring(root, encoding='UTF-8', xml_declaration=True))
+        return True
+
+    tracks_to_add = num_tracks - base_num_tracks
+    print(f"   Template de base: {base_num_tracks} pistes")
+    print(f"   Pistes à ajouter: {tracks_to_add}")
+
+    # Trouver le parent des MidiTrack (Tracks)
+    tracks_parent = root.find('.//Tracks')
+    if tracks_parent is None:
+        print("❌ Impossible de trouver l'élément <Tracks>!")
+        return False
+
+    # Trouver l'index de la première ReturnTrack (on va insérer AVANT)
+    return_track = tracks_parent.find('.//ReturnTrack')
+    if return_track is None:
+        insert_index = len(list(tracks_parent))
+    else:
+        insert_index = list(tracks_parent).index(return_track)
+
+    # Collecter tous les IDs existants pour éviter les collisions
+    existing_ids = set()
+    for elem in root.iter():
+        if 'Id' in elem.attrib:
+            existing_ids.add(int(elem.attrib['Id']))
+
+    next_id = max(existing_ids) + 1 if existing_ids else 100000
+
+    # Dupliquer les pistes nécessaires (on duplique cycliquement si besoin)
+    for i in range(tracks_to_add):
+        # Dupliquer la piste i % base_num_tracks
+        source_track = midi_tracks[i % base_num_tracks]
+        new_track = deepcopy(source_track)
+
+        # Mettre à jour le nom de la piste
+        name_elem = new_track.find('.//Name/EffectiveName')
+        if name_elem is not None:
+            new_name = f"Track {base_num_tracks + i + 1}"
+            name_elem.set('Value', new_name)
+
+        # Remplacer tous les IDs par de nouveaux IDs uniques
+        for elem in new_track.iter():
+            if 'Id' in elem.attrib:
+                elem.attrib['Id'] = str(next_id)
+                next_id += 1
+
+        # Insérer la nouvelle piste AVANT les ReturnTrack
+        tracks_parent.insert(insert_index + i, new_track)
+
+        # Afficher la progression
+        if (i + 1) % 50 == 0 or (i + 1) == tracks_to_add:
+            print(f"   {i + 1}/{tracks_to_add} pistes ajoutées...")
+
+    # Mettre à jour NextPointeeId
+    next_pointee_elem = root.find('.//NextPointeeId')
+    if next_pointee_elem is not None:
+        next_pointee_elem.set('Value', str(next_id))
+
+    # Sauvegarder le nouveau template
+    print(f"   💾 Sauvegarde: {output_path}")
+    xml_str = etree.tostring(root, encoding='UTF-8', xml_declaration=True)
+
+    with gzip.open(output_path, 'wb', compresslevel=9) as f:
+        f.write(xml_str)
+
+    # Vérifier le résultat
+    total_tracks = len(root.findall('.//MidiTrack'))
+    print(f"   ✓ Template créé: {total_tracks} pistes MIDI")
+
+    return True
+
+
+def get_or_create_template(num_tracks_needed):
+    """Trouve ou crée automatiquement un template avec le nombre de pistes nécessaires
+
+    Args:
+        num_tracks_needed: Nombre de pistes MIDI requises
+
+    Returns:
+        Chemin du template (str) ou None si erreur
+    """
+    import os
+
+    # Chemins de recherche
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Arrondir au multiple de 50 supérieur (100, 150, 200, 250, etc.)
+    rounded_tracks = ((num_tracks_needed + 49) // 50) * 50
+    if rounded_tracks < 100:
+        rounded_tracks = 100
+
+    # Chercher un template existant avec au moins ce nombre de pistes
+    search_candidates = [
+        (rounded_tracks, f"./template_{rounded_tracks}_tracks.als"),
+        (rounded_tracks, f"{script_dir}/template_{rounded_tracks}_tracks.als"),
+        (200, "./template_200_tracks.als"),
+        (200, f"{script_dir}/template_200_tracks.als"),
+        (100, "./template_100_tracks.als"),
+        (100, f"{script_dir}/template_100_tracks.als"),
+    ]
+
+    # Chercher un template qui existe et qui a assez de pistes
+    for num, path in search_candidates:
+        if os.path.exists(path) and num >= num_tracks_needed:
+            print(f"📋 Utilisation du template: {os.path.basename(path)} ({num} pistes)")
+            return path
+
+    # Aucun template trouvé avec assez de pistes, créer automatiquement
+    print(f"\n📦 Aucun template trouvé avec {num_tracks_needed} pistes")
+
+    # Trouver un template de base pour duplication
+    base_template = None
+    for _, path in [(100, "./template_100_tracks.als"), (100, f"{script_dir}/template_100_tracks.als")]:
+        if os.path.exists(path):
+            base_template = path
+            break
+
+    if base_template is None:
+        print("❌ ERREUR: Aucun template de base trouvé (template_100_tracks.als)")
+        print("   Veuillez créer un template de base avec au moins 100 pistes MIDI.")
+        return None
+
+    # Créer le nouveau template
+    output_path = f"./template_{rounded_tracks}_tracks.als"
+    print(f"   Base: {os.path.basename(base_template)}")
+    print(f"   Cible: {os.path.basename(output_path)} ({rounded_tracks} pistes)")
+
+    if not create_template_with_n_tracks(base_template, output_path, rounded_tracks):
+        return None
+
+    print(f"   ✓ Template créé automatiquement!")
+    return output_path
+
+
+def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_pan_automation=False, enable_envelope=False, enable_sample_offset=False):
+    """Convertit un fichier XM/MOD en projet Ableton
 
     Args:
         xm_path: Chemin vers le fichier XM/MOD
-        template_path: Chemin vers le template Ableton
+        template_path: Chemin vers le template Ableton (optionnel, auto-créé si nécessaire)
         output_dir: Répertoire de sortie (optionnel)
         enable_pan_automation: Activer les automations de panning (effet 8xx)
         enable_envelope: Activer la conversion des enveloppes volume (expérimental)
@@ -1389,10 +1553,6 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
 
     if not os.path.exists(xm_path):
         print(f"❌ Erreur: '{xm_path}' n'existe pas")
-        return False
-
-    if not os.path.exists(template_path):
-        print(f"❌ Erreur: template '{template_path}' n'existe pas")
         return False
 
     # Détecter le format du fichier
@@ -1506,6 +1666,27 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
     # Créer un mapping instrument -> sample
     instrument_to_sample = {s['instrument']: s for s in samples}
 
+    # Compter combien de pistes on va utiliser
+    num_tracks_needed = sum(
+        len([inst for inst in tracks_data[channel].keys() if inst in instrument_to_sample])
+        for channel in tracks_data.keys()
+    )
+
+    print(f"\n🎹 {num_tracks_needed} pistes nécessaires")
+
+    # Obtenir ou créer le template avec le bon nombre de pistes
+    if template_path is None:
+        # Créer automatiquement un template avec le nombre de pistes nécessaire
+        template_path = get_or_create_template(num_tracks_needed)
+        if template_path is None:
+            return False
+    else:
+        # Template spécifié par l'utilisateur
+        if not os.path.exists(template_path):
+            print(f"❌ Erreur: template '{template_path}' n'existe pas")
+            return False
+        print(f"📋 Utilisation du template: {os.path.basename(template_path)}")
+
     # Charger le template
     print(f"\n📝 Chargement du template...")
     live_set = LiveSet.from_file(template_path)
@@ -1521,14 +1702,6 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
         return False
 
     print(f"   ✓ Template MultiSamplePart extrait de la première piste")
-
-    print(f"\n🎹 Remplissage des pistes...")
-
-    # Compter combien de pistes on va utiliser
-    num_tracks_needed = sum(
-        len([inst for inst in tracks_data[channel].keys() if inst in instrument_to_sample])
-        for channel in tracks_data.keys()
-    )
 
     if num_tracks_needed > len(live_set.primary_tracks):
         print(f"\n⚠️  ATTENTION: {num_tracks_needed} pistes nécessaires mais seulement {len(live_set.primary_tracks)} disponibles!")
@@ -1966,7 +2139,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='''
 ╔════════════════════════════════════════════════════════════╗
-║     XM2LIVE v2.5.0 - Tracker → Ableton Live Converter     ║
+║     XM2LIVE v2.6.0 - Tracker → Ableton Live Converter     ║
 ╚════════════════════════════════════════════════════════════╝
 
 Convertit les fichiers tracker (FastTracker 2 XM, Amiga MOD) en
@@ -1978,17 +2151,21 @@ projets Ableton Live avec samples, notes, tempo et effets.
 EXEMPLES D'UTILISATION
 ════════════════════════════════════════════════════════════
 
-Conversion simple:
+Conversion simple (template auto-créé):
   python3 xm2live.py mon_fichier.xm
   python3 xm2live.py ma_musique.mod
 
-Avec template personnalisé:
+Avec template personnalisé (optionnel):
   python3 xm2live.py mon_fichier.xm /path/to/template.als
 
 Avec options avancées:
   python3 xm2live.py fichier.xm --pan-automation
   python3 xm2live.py fichier.xm --sample-offset
   python3 xm2live.py fichier.xm --pan-automation --sample-offset
+
+Note: Le template est maintenant OPTIONNEL. Si non spécifié, un
+      template avec le nombre exact de pistes nécessaires sera
+      créé automatiquement.
 
 ════════════════════════════════════════════════════════════
 SWITCHES DISPONIBLES
@@ -2041,30 +2218,7 @@ Documentation complète: README.md
     args = parser.parse_args()
 
     xm_path = args.fichier
-
-    # Chercher le template dans plusieurs endroits
-    if args.template:
-        template_path = args.template
-    else:
-        # 1. À côté du script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        template_next_to_script = os.path.join(script_dir, "template_100_tracks.als")
-
-        # 2. Répertoire courant (fallback)
-        current_dir_template = "./template_100_tracks.als"
-
-        if os.path.exists(template_next_to_script):
-            template_path = template_next_to_script
-        elif os.path.exists(current_dir_template):
-            template_path = current_dir_template
-        else:
-            print("❌ ERREUR: Template non trouvé!")
-            print(f"   Cherché dans:")
-            print(f"   - {template_next_to_script}")
-            print(f"   - {current_dir_template}")
-            print(f"\n   Créez un template avec 100 pistes MIDI, chacune avec un Sampler")
-            print(f"   La première piste doit contenir un sample pour servir d'exemple.")
-            sys.exit(1)
+    template_path = args.template  # None si non spécifié, sera auto-créé
 
     try:
         success = convert_xm_to_ableton(xm_path, template_path,
