@@ -105,23 +105,43 @@ def parse_pattern_data(data, num_rows, num_channels):
                     effect_param = data[pos + 3]
                     pos += 4
 
+            # Décoder la colonne volume XM (0x10-0x50 = volume 0-64)
+            decoded_volume = None
+            if volume is not None:
+                if 0x10 <= volume <= 0x50:
+                    decoded_volume = volume - 0x10  # 0x10 -> 0, 0x50 -> 64
+                # Ignorer les autres valeurs (0x00-0x0F, 0x60+ sont des commandes spéciales)
+
             # Si on a une note valide et un instrument
             if note and note > 0 and note < 97 and instrument and instrument > 0:
                 # Extraire le sample offset si effet 9xx est présent
                 sample_offset_xm = None
                 if effect_type == 0x09:  # Effet 9xx = Sample Offset
                     sample_offset_xm = effect_param if effect_param is not None else 0
-                    print(f"DEBUG parser: effet 9xx détecté, row={row}, channel={channel}, instrument={instrument:02X}, param={effect_param:02X}")
 
                 notes.append({
                     'row': row,
                     'channel': channel,
                     'note': note,
                     'instrument': instrument,
-                    'volume': volume if volume else 64,
+                    'volume': 64 if decoded_volume is None else decoded_volume,
                     'effect_type': effect_type,
                     'effect_param': effect_param,
                     'sample_offset_xm': sample_offset_xm
+                })
+
+            # Capturer volume 00 même sans note (événement "note stop")
+            elif decoded_volume is not None and decoded_volume == 0:
+                notes.append({
+                    'row': row,
+                    'channel': channel,
+                    'note': None,
+                    'instrument': None,
+                    'volume': 0,
+                    'effect_type': None,
+                    'effect_param': None,
+                    'sample_offset_xm': None,
+                    'is_volume_stop': True
                 })
 
     return notes
@@ -307,7 +327,8 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                                     'loop_length': header['loop_length'],
                                     'loop_type': header['type'] & 0x03,  # Bits 0-1: 0=off, 1=forward, 2=ping-pong
                                     'volume': header['volume'],
-                                    'panning': header['panning']  # 0-255 (0=gauche, 128=centre, 255=droite)
+                                    'panning': header['panning'],  # 0-255 (0=gauche, 128=centre, 255=droite)
+                                    'length': len(decoded)  # Longueur en samples (pour effet 9xx)
                                 })
 
                                 print(f"    ✓ {safe_name}")
@@ -342,12 +363,22 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
 
         for note_event in pattern['data']:
             channel = note_event['channel']
-            instrument = note_event['instrument']
             row = note_event['row']
 
             # Calculer le temps en beats (4 rows = 1 beat en général)
             time_in_pattern = row / 4.0
             absolute_time = current_time + time_in_pattern
+
+            # Si c'est un événement volume stop (volume 00)
+            if note_event.get('is_volume_stop'):
+                notes_by_channel[channel].append({
+                    'time': absolute_time,
+                    'is_volume_stop': True
+                })
+                continue  # Passer au suivant
+
+            # Code pour les vraies notes
+            instrument = note_event['instrument']
 
             # Convertir la note XM (1-96) en MIDI (0-127)
             # Note 1 = C-0, Note 49 = C-4 (middle C = MIDI 60)
@@ -364,8 +395,6 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
 
             # Extraire le sample offset si effet 9xx est présent
             sample_offset_xm = note_event.get('sample_offset_xm')  # Déjà extrait par le parser
-            if sample_offset_xm is not None:
-                print(f"DEBUG organize: note avec 9xx trouvée, channel={channel}, instrument={instrument:02X}, offset={sample_offset_xm:02X}")
 
             # Stocker temporairement (durée sera calculée après)
             notes_by_channel[channel].append({
@@ -388,10 +417,28 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
         channel_notes.sort(key=lambda n: n['time'])
 
         for i, note in enumerate(channel_notes):
-            # Chercher la prochaine note sur ce canal
-            if i + 1 < len(channel_notes):
-                next_note_time = channel_notes[i + 1]['time']
-                interval = next_note_time - note['time']
+            # Ignorer les événements volume stop (utilisés juste pour calcul)
+            if note.get('is_volume_stop'):
+                continue
+
+            # Chercher le prochain événement (note OU volume stop)
+            next_event_time = None
+            for j in range(i + 1, len(channel_notes)):
+                next_event = channel_notes[j]
+
+                # Volume stop coupe la note immédiatement
+                if next_event.get('is_volume_stop'):
+                    next_event_time = next_event['time']
+                    break
+
+                # Nouvelle note coupe aussi
+                if not next_event.get('is_volume_stop'):
+                    next_event_time = next_event['time']
+                    break
+
+            # Calculer la durée
+            if next_event_time is not None:
+                interval = next_event_time - note['time']
                 # Limiter à 4 beats max pour la lisibilité
                 note['duration'] = min(interval, 4.0)
             else:

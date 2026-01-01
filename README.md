@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.4.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes expérimentales)
+**Version actuelle : 2.5.0** (support XM + MOD + Volume + Panning + Sample Offset + Volume 00 + Enveloppes expérimentales)
 
 ## 🎵 Fonctionnalités
 
@@ -18,6 +18,7 @@ Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MO
 - 🔊 **Volume** - Volume par défaut des samples + vélocité MIDI par note (headroom -12dB)
 - 🎧 **Panning** - Panning par défaut des samples + automations optionnelles (effet 8xx avec `--pan-automation`)
 - 🎚️ **Sample Offset** - Effet 9xx supporté via Simpler (avec `--sample-offset`, limitation ping-pong→forward)
+- 🔇 **Volume 00 (Note Stop)** - Les volumes 00 raccourcissent automatiquement les notes (XM + MOD effet C00)
 - 🎛️ **Enveloppes** - Conversion expérimentale FT2 → ADSR Ableton (avec `--envelope`, approximation)
 - 🎨 **Organisation** - Groupes par instrument, couleurs par canal
 - 🔊 **Monophonie** - 1 voix par sampler (comportement tracker)
@@ -38,9 +39,9 @@ pip install buildable numpy lxml
 ### Template Ableton
 Un fichier template `.als` avec 100 pistes MIDI, chacune contenant un Sampler.
 
-**Où le placer :**
-- À côté du script : `xm2live/template_100_tracks.als`
-- OU dans le répertoire des modules : `/Users/sam/Music/Compo/All Compo/Modules/template_100_tracks.als`
+**Le template est inclus :**
+- Fichier fourni : `template_100_tracks.als` (dans le répertoire du script)
+- Vous pouvez utiliser votre propre template avec l'option `--template`
 
 ## 🚀 Installation
 
@@ -119,7 +120,7 @@ python3 xm2live.py mon_fichier.xm --pan-automation --sample-offset
 
 ```bash
 # Convertir tout un répertoire (récursif)
-python3 batch_convert.py "/Users/sam/Music/Compo/All Compo/Modules"
+python3 batch_convert.py "/path/to/modules"
 
 # Sans recherche récursive (uniquement répertoire principal)
 python3 batch_convert.py "/path/to/modules" --no-recursive
@@ -169,7 +170,7 @@ Temps total: 5m 23s
 
 ### Exemple 1 : Module XM avec ping-pong loops
 ```bash
-python3 xm2live.py "/Users/sam/Music/Modules/mec3.xm"
+python3 xm2live.py "mec3.xm"
 ```
 **Résultat :**
 - BPM : 154
@@ -179,7 +180,7 @@ python3 xm2live.py "/Users/sam/Music/Modules/mec3.xm"
 
 ### Exemple 2 : Module MOD avec Speed personnalisé
 ```bash
-python3 xm2live.py "/Users/sam/Music/Modules/242.mod"
+python3 xm2live.py "242.mod"
 ```
 **Résultat :**
 - Speed détecté : 3 ticks/row
@@ -189,10 +190,10 @@ python3 xm2live.py "/Users/sam/Music/Modules/242.mod"
 
 ### Exemple 3 : Conversion batch d'un répertoire
 ```bash
-python3 batch_convert.py "/Users/sam/Music/Modules/divers"
+python3 batch_convert.py "/path/to/modules"
 ```
 **Résultat :**
-- 21 fichiers détectés et convertis
+- Détection automatique des fichiers .xm et .mod
 - Progression en temps réel
 - Statistiques finales avec temps total
 
@@ -248,9 +249,9 @@ Aucune variable d'environnement requise.
 
 ### Chemins par défaut
 Le script cherche le template dans cet ordre :
-1. Argument de ligne de commande
+1. Argument de ligne de commande (`--template`)
 2. À côté du script : `./template_100_tracks.als`
-3. Chemin par défaut : `/Users/sam/Music/Compo/All Compo/Modules/template_100_tracks.als`
+3. Répertoire courant : `./template_100_tracks.als`
 
 ## 🐛 Dépannage
 
@@ -303,7 +304,9 @@ Ce projet a été créé pour un usage personnel. Les améliorations et correcti
 
 ## 📄 Licence
 
-Usage personnel - Code créé avec l'assistance de Claude (Anthropic)
+MIT License - Voir fichier [LICENSE](LICENSE) pour plus de détails.
+
+Code créé avec l'assistance de Claude (Anthropic).
 
 ## 🙏 Remerciements
 

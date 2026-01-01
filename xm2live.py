@@ -18,7 +18,6 @@ import wave
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
-from envelope_reader import read_xm_envelopes
 from buildable.live_set import LiveSet
 
 # Importer les fonctions de lecture XM
@@ -418,8 +417,9 @@ def get_simpler_template(next_id):
     import os
 
     # Chemins possibles pour le template
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     template_paths = [
-        "/Users/sam/xm2live_v2/simpler_template.xml",
+        os.path.join(script_dir, "simpler_template.xml"),
         "./simpler_template.xml"
     ]
 
@@ -473,7 +473,7 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
     Note:
         - Simpler ne supporte PAS les loops ping-pong (converti en forward)
         - Multi-sample non supporté (charge seulement le premier sample)
-        - SNAP est activé si loop, désactivé sinon
+        - SNAP est toujours activé (évite les clics lors des automations Sample Start)
     """
     sample_path = sample_info['path']
     relative_note = sample_info.get('relative_note', 0)
@@ -482,7 +482,7 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
     devices = track.element.find('.//DeviceChain/Devices')
     if devices is None:
         print(f"    ⚠️  Pas de DeviceChain/Devices trouvé")
-        return next_id
+        return (next_id, None)
 
     # Supprimer le MultiSampler existant s'il y en a un
     sampler = devices.find('./MultiSampler')
@@ -492,7 +492,7 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
     # Charger le template Simpler (avec régénération des IDs)
     simpler_template, next_id = get_simpler_template(next_id)
     if simpler_template is None:
-        return next_id
+        return (next_id, None)
 
     # Ajouter le Simpler à la piste
     devices.append(simpler_template)
@@ -503,7 +503,7 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
     sample_part = simpler.find('.//Player/MultiSampleMap/SampleParts/MultiSamplePart')
     if sample_part is None:
         print(f"    ⚠️  Pas de MultiSamplePart trouvé dans le template Simpler")
-        return False
+        return (next_id, None)
 
     # Mettre à jour les chemins du sample
     file_ref = sample_part.find('.//SampleRef/FileRef')
@@ -622,6 +622,10 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
                 loop_on_elem = simpler.find('.//LoopModulators/LoopOn/Manual')
                 snap_elem = simpler.find('.//Snap/Manual')
 
+                # IMPORTANT: SNAP toujours activé (évite les clics lors des automations Sample Start)
+                if snap_elem is not None:
+                    snap_elem.set('Value', 'true')
+
                 if loop_type > 0:  # 1=forward, 2=ping-pong
                     # LIMITATION : Simpler ne supporte PAS ping-pong, conversion en forward
                     loop_start = sample_info.get('loop_start', 0)
@@ -652,21 +656,15 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
                     if loop_on_elem is not None:
                         loop_on_elem.set('Value', 'true')
 
-                    # Activer SNAP (car il y a une loop)
-                    if snap_elem is not None:
-                        snap_elem.set('Value', 'true')
-
                     if loop_type == 2:
                         print(f"    → Boucle: {loop_start} - {loop_end} (Ping-Pong → Forward, limitation Simpler)")
                     else:
                         print(f"    → Boucle: {loop_start} - {loop_end} (Forward)")
 
                 else:
-                    # Pas de loop : désactiver LoopOn et SNAP
+                    # Pas de loop : désactiver LoopOn
                     if loop_on_elem is not None:
                         loop_on_elem.set('Value', 'false')
-                    if snap_elem is not None:
-                        snap_elem.set('Value', 'false')
 
         except Exception as e:
             print(f"    ⚠️  Erreur lors de la lecture du WAV: {e}")
@@ -686,7 +684,32 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
             configure_envelope_adsr(simpler, envelope_info, bpm, speed)
 
     print(f"    ✅ Simpler configuré (effet 9xx supporté)")
-    return next_id
+
+    # Récupérer l'ID de l'AutomationTarget SampleStart pour les automations 9xx
+    # On le fait ICI pendant qu'on manipule le Simpler, car buildable ne persiste pas les recherches ultérieures
+    automation_target_id = None
+    sample_start_target = simpler.find('.//LoopModulators/SampleStart/AutomationTarget')
+    if sample_start_target is not None:
+        automation_target_id = sample_start_target.get('Id')
+        if not automation_target_id:
+            # Créer un ID si absent
+            automation_target_id = str(next_id)
+            sample_start_target.set('Id', automation_target_id)
+            next_id += 1
+
+        # Activer IsModulated dans LoopModulators (REQUIS pour automation visible)
+        from lxml import etree
+        loop_modulators = simpler.find('.//LoopModulators')
+        if loop_modulators is not None:
+            is_modulated = loop_modulators.find('./IsModulated')
+            if is_modulated is None:
+                is_modulated = etree.Element('IsModulated')
+                is_modulated.set('Value', 'true')
+                loop_modulators.insert(0, is_modulated)
+            else:
+                is_modulated.set('Value', 'true')
+
+    return (next_id, automation_target_id)
 
 
 def update_midi_clip_notes(track, notes):
@@ -759,12 +782,187 @@ def update_midi_clip_notes(track, notes):
 
     return True
 
-def create_sample_offset_automation(track, notes, next_id):
+def add_sample_offset_automations_to_file(als_path, automation_data, next_id):
+    """Ajoute les automations de Sample Start directement dans le fichier .als après sauvegarde
+
+    Cette fonction est nécessaire car buildable ne persiste pas les modifications XML directes.
+    Elle décompresse le fichier .als, ajoute les AutomationEnvelope, puis recompresse.
+
+    Args:
+        als_path: Chemin du fichier .als sauvegardé
+        automation_data: Liste de dicts avec:
+            - track_name: Nom de la piste
+            - target_id: ID de l'AutomationTarget SampleStart
+            - notes: Liste des notes avec time, duration, sample_offset_xm
+            - sample_length: Longueur du sample en samples (pour conversion 9xx correcte)
+        next_id: Prochain ID disponible (pour AutomationEnvelope et FloatEvent)
+
+    Returns:
+        True si succès, False sinon
+    """
+    import gzip
+    from lxml import etree
+
+    if not automation_data:
+        return True  # Rien à faire
+
+    print(f"\n✍️  Post-processing: Ajout des automations Sample Start...")
+
+    try:
+        # 1. Décompresser le fichier .als
+        with gzip.open(als_path, 'rb') as f:
+            xml_data = f.read()
+
+        # 2. Parser le XML
+        root = etree.fromstring(xml_data)
+
+        # 3. Pour chaque piste avec automation
+        for data in automation_data:
+            track_name = data['track_name']
+            target_id = data['target_id']
+            notes = data['notes']
+            sample_length = data['sample_length']  # Longueur en samples
+
+            # IMPORTANT: Utiliser findall() car il peut y avoir PLUSIEURS pistes avec le même nom
+            # On doit trouver celle qui contient un OriginalSimpler
+            name_elems = root.findall(f'.//MidiTrack/Name/EffectiveName[@Value="{track_name}"]')
+            if not name_elems:
+                print(f"   ⚠️  Piste '{track_name}' non trouvée")
+                continue
+
+            # Chercher la MidiTrack qui contient un OriginalSimpler
+            midi_track = None
+            for name_elem in name_elems:
+                # Remonter à MidiTrack
+                candidate_track = name_elem
+                while candidate_track is not None and candidate_track.tag != 'MidiTrack':
+                    candidate_track = candidate_track.getparent()
+
+                if candidate_track is None:
+                    continue
+
+                # Vérifier si cette piste contient un OriginalSimpler
+                simpler = candidate_track.find('.//OriginalSimpler')
+                if simpler is not None:
+                    midi_track = candidate_track
+                    break
+
+            if midi_track is None:
+                print(f"   ⚠️  Piste '{track_name}' avec OriginalSimpler non trouvée")
+                continue
+
+            # Trouver AutomationEnvelopes
+            automation_envelopes = midi_track.find('.//AutomationEnvelopes')
+            if automation_envelopes is None:
+                print(f"   ⚠️  AutomationEnvelopes non trouvé pour '{track_name}'")
+                continue
+
+            # Supprimer l'ancien Envelopes et en créer un nouveau
+            envelopes_container = automation_envelopes.find('.//Envelopes')
+            if envelopes_container is not None:
+                automation_envelopes.remove(envelopes_container)
+
+            envelopes_container = etree.SubElement(automation_envelopes, 'Envelopes')
+
+            # Créer l'AutomationEnvelope
+            envelope = etree.SubElement(envelopes_container, 'AutomationEnvelope')
+            envelope.set('Id', str(next_id))
+            next_id += 1
+
+            # EnvelopeTarget pointant vers le SampleStart
+            envelope_target = etree.SubElement(envelope, 'EnvelopeTarget')
+            pointee_id = etree.SubElement(envelope_target, 'PointeeId')
+            pointee_id.set('Value', target_id)
+
+            # Automation avec Events
+            automation = etree.SubElement(envelope, 'Automation')
+            events = etree.SubElement(automation, 'Events')
+
+            # Point initial à temps 0
+            event_initial = etree.SubElement(events, 'FloatEvent')
+            event_initial.set('Id', str(next_id))
+            next_id += 1
+            event_initial.set('Time', '0.0')
+            event_initial.set('Value', '0.0')
+
+            # Trier les notes par temps
+            sorted_notes = sorted(notes, key=lambda n: n['time'])
+
+            # Ajouter les points pour chaque note
+            for note in sorted_notes:
+                time = note['time']
+                duration = note.get('duration', 1.0)
+                sample_offset_xm = note.get('sample_offset_xm')
+
+                if sample_offset_xm is not None:
+                    # Note avec effet 9xx : créer 2 points (plateau)
+                    # Conversion correcte : 9xx utilise un multiplicateur de 256 bytes
+                    # Pour 16-bit (2 bytes/sample) : offset_samples = (xx * 256) / 2
+                    offset_in_bytes = sample_offset_xm * 256
+                    offset_in_samples = offset_in_bytes / 2.0  # 16-bit
+                    sample_start = offset_in_samples / sample_length if sample_length > 0 else 0.0
+                    sample_start = max(0.0, min(1.0, sample_start))
+
+                    # Point au début de la note
+                    event_start = etree.SubElement(events, 'FloatEvent')
+                    event_start.set('Id', str(next_id))
+                    next_id += 1
+                    event_start.set('Time', str(time))
+                    event_start.set('Value', str(sample_start))
+
+                    # Point à la fin de la note
+                    event_end = etree.SubElement(events, 'FloatEvent')
+                    event_end.set('Id', str(next_id))
+                    next_id += 1
+                    event_end.set('Time', str(time + duration))
+                    event_end.set('Value', str(sample_start))
+                else:
+                    # Note SANS effet 9xx : créer 2 points à 0.0 (plateau)
+                    # Point au début de la note
+                    event_start = etree.SubElement(events, 'FloatEvent')
+                    event_start.set('Id', str(next_id))
+                    next_id += 1
+                    event_start.set('Time', str(time))
+                    event_start.set('Value', '0.0')
+
+                    # Point à la fin de la note (maintien du plateau)
+                    event_end = etree.SubElement(events, 'FloatEvent')
+                    event_end.set('Id', str(next_id))
+                    next_id += 1
+                    event_end.set('Time', str(time + duration))
+                    event_end.set('Value', '0.0')
+
+            # Ajouter AutomationTransformViewState
+            transform_state = etree.SubElement(automation, 'AutomationTransformViewState')
+            is_pending = etree.SubElement(transform_state, 'IsTransformPending')
+            is_pending.set('Value', 'false')
+            time_transforms = etree.SubElement(transform_state, 'TimeAndValueTransforms')
+
+            num_points = len(events.findall('FloatEvent'))
+            print(f"   ✓ '{track_name}': {num_points} points d'automation")
+
+        # 4. Recompresser et sauvegarder
+        xml_bytes = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
+        with gzip.open(als_path, 'wb') as f:
+            f.write(xml_bytes)
+
+        print(f"   ✓ Fichier .als mis à jour avec {len(automation_data)} automations")
+        return True
+
+    except Exception as e:
+        print(f"   ❌ ERREUR lors du post-processing: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def create_sample_offset_automation(track, notes, sample_length, next_id):
     """Crée une automation de Sample Start basée sur les effets 9xx des notes
 
     Args:
         track: L'élément Track Ableton
         notes: Liste des notes avec leur sample_offset_xm (0-255) ou None
+        sample_length: Longueur du sample en samples (pour conversion 9xx correcte)
         next_id: Prochain ID disponible (pour AutomationTarget)
 
     Returns:
@@ -772,7 +970,7 @@ def create_sample_offset_automation(track, notes, next_id):
 
     Note:
         - L'effet 9xx (Sample Offset) est converti en Sample Start (0.0-1.0)
-        - Conversion approximative : offset_xm / 255.0 = sample_start
+        - Conversion correcte : offset_samples = (xx * 256) / 2, puis sample_start = offset_samples / sample_length
         - Utilise le pattern plateau (2 points par note) pour éviter l'interpolation
     """
     # Filtrer les notes qui ont un sample offset défini
@@ -802,43 +1000,50 @@ def create_sample_offset_automation(track, notes, next_id):
         next_id += 1
 
     # IMPORTANT: Activer IsModulated dans LoopModulators (REQUIS pour que l'automation soit visible)
+    from lxml import etree
     loop_modulators = track.element.find('.//OriginalSimpler/LoopModulators')
     if loop_modulators is not None:
         is_modulated = loop_modulators.find('./IsModulated')
         if is_modulated is None:
             # Créer IsModulated si absent (doit être le PREMIER enfant de LoopModulators)
-            is_modulated = ET.Element('IsModulated')
+            is_modulated = etree.Element('IsModulated')
             is_modulated.set('Value', 'true')
             loop_modulators.insert(0, is_modulated)  # Insérer en premier
         else:
             is_modulated.set('Value', 'true')
 
     # Trouver ou créer AutomationEnvelopes
+    from lxml import etree
     automation_envelopes = track.element.find('.//AutomationEnvelopes')
     if automation_envelopes is None:
-        automation_envelopes = ET.SubElement(track.element, 'AutomationEnvelopes')
+        automation_envelopes = etree.SubElement(track.element, 'AutomationEnvelopes')
 
+    # Trouver Envelopes - S'il existe, le SUPPRIMER et en recréer un nouveau
     envelopes_container = automation_envelopes.find('.//Envelopes')
-    if envelopes_container is None:
-        envelopes_container = ET.SubElement(automation_envelopes, 'Envelopes')
+    if envelopes_container is not None:
+        # Supprimer l'ancien conteneur
+        automation_envelopes.remove(envelopes_container)
+
+    # Recréer un nouveau conteneur Envelopes
+    envelopes_container = etree.SubElement(automation_envelopes, 'Envelopes')
 
     # Créer l'AutomationEnvelope
-    envelope = ET.SubElement(envelopes_container, 'AutomationEnvelope')
+    envelope = etree.SubElement(envelopes_container, 'AutomationEnvelope')
     envelope.set('Id', str(next_id))
     next_id += 1
 
     # EnvelopeTarget pointant vers le SampleStart
-    envelope_target = ET.SubElement(envelope, 'EnvelopeTarget')
-    pointee_id = ET.SubElement(envelope_target, 'PointeeId')
+    envelope_target = etree.SubElement(envelope, 'EnvelopeTarget')
+    pointee_id = etree.SubElement(envelope_target, 'PointeeId')
     pointee_id.set('Value', sample_start_target_id)
 
     # Automation avec Events
-    automation = ET.SubElement(envelope, 'Automation')
-    events = ET.SubElement(automation, 'Events')
+    automation = etree.SubElement(envelope, 'Automation')
+    events = etree.SubElement(automation, 'Events')
 
     # Créer les points d'automation
     # IMPORTANT: Point initial à temps 0 avec Sample Start = 0.0
-    event_initial = ET.SubElement(events, 'FloatEvent')
+    event_initial = etree.SubElement(events, 'FloatEvent')
     event_initial.set('Id', str(next_id))
     next_id += 1
     event_initial.set('Time', '0.0')
@@ -855,19 +1060,22 @@ def create_sample_offset_automation(track, notes, next_id):
 
         if sample_offset_xm is not None:
             # Note avec effet 9xx : créer 2 points (plateau)
-            # Conversion : offset_xm (0-255) → sample_start (0.0-1.0)
-            sample_start = sample_offset_xm / 255.0
+            # Conversion correcte : 9xx utilise un multiplicateur de 256 bytes
+            # Pour 16-bit (2 bytes/sample) : offset_samples = (xx * 256) / 2
+            offset_in_bytes = sample_offset_xm * 256
+            offset_in_samples = offset_in_bytes / 2.0  # 16-bit
+            sample_start = offset_in_samples / sample_length if sample_length > 0 else 0.0
             sample_start = max(0.0, min(1.0, sample_start))
 
             # Point au début de la note
-            event_start = ET.SubElement(events, 'FloatEvent')
+            event_start = etree.SubElement(events, 'FloatEvent')
             event_start.set('Id', str(next_id))
             next_id += 1
             event_start.set('Time', str(time))
             event_start.set('Value', str(sample_start))
 
             # Point à la fin de la note (maintien du plateau)
-            event_end = ET.SubElement(events, 'FloatEvent')
+            event_end = etree.SubElement(events, 'FloatEvent')
             event_end.set('Id', str(next_id))
             next_id += 1
             event_end.set('Time', str(time + duration))
@@ -875,17 +1083,17 @@ def create_sample_offset_automation(track, notes, next_id):
 
         else:
             # Note SANS effet 9xx : retour à 0.0 (début du sample)
-            event_return = ET.SubElement(events, 'FloatEvent')
+            event_return = etree.SubElement(events, 'FloatEvent')
             event_return.set('Id', str(next_id))
             next_id += 1
             event_return.set('Time', str(time))
             event_return.set('Value', '0.0')
 
     # Ajouter AutomationTransformViewState (requis par Ableton)
-    transform_state = ET.SubElement(automation, 'AutomationTransformViewState')
-    is_pending = ET.SubElement(transform_state, 'IsTransformPending')
+    transform_state = etree.SubElement(automation, 'AutomationTransformViewState')
+    is_pending = etree.SubElement(transform_state, 'IsTransformPending')
     is_pending.set('Value', 'false')
-    time_transforms = ET.SubElement(transform_state, 'TimeAndValueTransforms')
+    time_transforms = etree.SubElement(transform_state, 'TimeAndValueTransforms')
 
     num_points = len(events.findall('FloatEvent'))
     print(f"    → Automation Sample Start (9xx): {num_points} points")
@@ -1235,23 +1443,30 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
 
     # Lire les enveloppes si activé (fonction séparée, plus sûr)
     if enable_envelope and not is_mod:  # Seulement pour XM, pas MOD
-        print(f"\n🎛️  Lecture des enveloppes volume...")
-        envelopes = read_xm_envelopes(xm_path)
-        # Merger les enveloppes avec les samples
-        for sample in samples:
-            inst_num = sample['instrument']
-            if inst_num in envelopes:
-                sample['envelope'] = envelopes[inst_num]
-            else:
-                # Enveloppe par défaut
-                sample['envelope'] = {
-                    'enabled': False,
-                    'sustain_enabled': False,
-                    'num_points': 0,
-                    'sustain_point': 0,
-                    'points': []
-                }
-        print(f"    → {len(envelopes)} enveloppes chargées")
+        try:
+            from envelope_reader import read_xm_envelopes
+        except ImportError:
+            print("⚠️  AVERTISSEMENT: Le module envelope_reader n'est pas disponible.")
+            print("   La conversion des enveloppes est désactivée.")
+            enable_envelope = False
+        else:
+            print(f"\n🎛️  Lecture des enveloppes volume...")
+            envelopes = read_xm_envelopes(xm_path)
+            # Merger les enveloppes avec les samples
+            for sample in samples:
+                inst_num = sample['instrument']
+                if inst_num in envelopes:
+                    sample['envelope'] = envelopes[inst_num]
+                else:
+                    # Enveloppe par défaut
+                    sample['envelope'] = {
+                        'enabled': False,
+                        'sustain_enabled': False,
+                        'num_points': 0,
+                        'sustain_point': 0,
+                        'points': []
+                    }
+            print(f"    → {len(envelopes)} enveloppes chargées")
 
     print(f"\n{'='*60}")
     print(f"MODULE: {xm_info['name']}")
@@ -1366,6 +1581,9 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
     # Commence à 100000 pour éviter les conflits avec le template
     global_next_id = 100000
 
+    # Liste pour collecter les données d'automation Sample Start (post-processing)
+    automation_data_list = []
+
     for track_info in tracks_to_create:
         if track_index >= len(live_set.primary_tracks):
             print(f"\n⚠️  Plus de pistes disponibles dans le template!")
@@ -1382,9 +1600,10 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
         instrument = track_info['instrument']
         use_simpler = (enable_sample_offset and instrument in instruments_with_9xx)
 
+        automation_target_id = None
         if use_simpler:
             # Utiliser Simpler (pour effet 9xx)
-            global_next_id = populate_track_with_simpler(track, track_info['sample'], output_dir, global_next_id,
+            global_next_id, automation_target_id = populate_track_with_simpler(track, track_info['sample'], output_dir, global_next_id,
                                        bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
         else:
             # Utiliser Sampler (normal)
@@ -1393,9 +1612,20 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
 
         update_midi_clip_notes(track, track_info['notes'])
 
-        # Créer l'automation Sample Start basée sur les effets 9xx (si activé et Simpler)
-        if use_simpler and enable_sample_offset:
-            global_next_id = create_sample_offset_automation(track, track_info['notes'], global_next_id)
+        # Collecter les données pour l'automation Sample Start (si activé et Simpler)
+        if use_simpler and enable_sample_offset and automation_target_id:
+            # Filtrer les notes qui ont un sample offset défini
+            offset_notes = [note for note in track_info['notes'] if note.get('sample_offset_xm') is not None]
+
+            if offset_notes:
+                # Collecter les données pour post-processing
+                automation_data_list.append({
+                    'track_name': track_info['track_name'],
+                    'target_id': automation_target_id,
+                    'notes': track_info['notes'],
+                    'sample_length': track_info['sample']['length']  # Longueur en samples
+                })
+                print(f"    → Automation Sample Start préparée ({len(offset_notes)} notes avec effet 9xx)")
 
         # Créer l'automation de panning basée sur les effets 8xx (si activé)
         if enable_pan_automation:
@@ -1709,6 +1939,10 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
     print(f"\n💾 Sauvegarde du projet...")
     live_set.write_to_file(als_path)
 
+    # Post-processing: Ajouter les automations Sample Start directement dans le fichier .als
+    if enable_sample_offset and automation_data_list:
+        add_sample_offset_automations_to_file(als_path, automation_data_list, global_next_id)
+
     print(f"\n{'='*60}")
     print(f"✓ CONVERSION TERMINÉE")
     print(f"{'='*60}")
@@ -1723,16 +1957,71 @@ def convert_xm_to_ableton(xm_path, template_path, output_dir=None, enable_pan_au
 
 def main():
     import argparse
+    import sys
+
+    # Si aucun argument, afficher l'aide
+    if len(sys.argv) == 1:
+        sys.argv.append('--help')
 
     parser = argparse.ArgumentParser(
-        description='Convertir un fichier XM/MOD en projet Ableton Live',
+        description='''
+╔════════════════════════════════════════════════════════════╗
+║     XM2LIVE v2.5.0 - Tracker → Ableton Live Converter     ║
+╚════════════════════════════════════════════════════════════╝
+
+Convertit les fichiers tracker (FastTracker 2 XM, Amiga MOD) en
+projets Ableton Live avec samples, notes, tempo et effets.
+        ''',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
-Exemples:
-  python3 xm2live.py mon_module.xm
-  python3 xm2live.py mon_module.mod
-  python3 xm2live.py mon_module.xm template.als
-  python3 xm2live.py mon_module.xm --pan-automation
+════════════════════════════════════════════════════════════
+EXEMPLES D'UTILISATION
+════════════════════════════════════════════════════════════
+
+Conversion simple:
+  python3 xm2live.py mon_fichier.xm
+  python3 xm2live.py ma_musique.mod
+
+Avec template personnalisé:
+  python3 xm2live.py mon_fichier.xm /path/to/template.als
+
+Avec options avancées:
+  python3 xm2live.py fichier.xm --pan-automation
+  python3 xm2live.py fichier.xm --sample-offset
+  python3 xm2live.py fichier.xm --pan-automation --sample-offset
+
+════════════════════════════════════════════════════════════
+SWITCHES DISPONIBLES
+════════════════════════════════════════════════════════════
+
+--pan-automation    Active les automations de panning (effet 8xx)
+                    Crée des automations Track Pan dans Ableton
+                    Par défaut: désactivé
+
+--sample-offset     Active l'effet 9xx (Sample Offset) via Simpler
+                    Crée des automations Sample Start
+                    LIMITATION: ping-pong loops → forward
+                    Par défaut: désactivé
+
+--envelope          Active conversion enveloppes FT2 → ADSR Ableton
+                    Conversion approximative (12 points → 4 ADSR)
+                    EXPÉRIMENTAL - ajustements manuels recommandés
+                    Par défaut: désactivé
+
+════════════════════════════════════════════════════════════
+RÉSULTAT
+════════════════════════════════════════════════════════════
+
+Le projet converti sera créé dans:
+  [répertoire source]/Conversions Ableton Live/[nom]_Ableton_Project/
+
+Contenu:
+  • [nom].als           - Projet Ableton Live
+  • Samples/            - Samples WAV exportés (16-bit)
+
+════════════════════════════════════════════════════════════
+Pour plus d'aide: python3 xm2live.py --help
+Documentation complète: README.md
         '''
     )
 
@@ -1761,18 +2050,18 @@ Exemples:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         template_next_to_script = os.path.join(script_dir, "template_100_tracks.als")
 
-        # 2. Chemin par défaut
-        default_template = "/Users/sam/Music/Compo/All Compo/Modules/template_100_tracks.als"
+        # 2. Répertoire courant (fallback)
+        current_dir_template = "./template_100_tracks.als"
 
         if os.path.exists(template_next_to_script):
             template_path = template_next_to_script
-        elif os.path.exists(default_template):
-            template_path = default_template
+        elif os.path.exists(current_dir_template):
+            template_path = current_dir_template
         else:
             print("❌ ERREUR: Template non trouvé!")
             print(f"   Cherché dans:")
             print(f"   - {template_next_to_script}")
-            print(f"   - {default_template}")
+            print(f"   - {current_dir_template}")
             print(f"\n   Créez un template avec 100 pistes MIDI, chacune avec un Sampler")
             print(f"   La première piste doit contenir un sample pour servir d'exemple.")
             sys.exit(1)

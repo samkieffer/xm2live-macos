@@ -6,12 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.4.0)
+**Status:** Production-ready (Version 2.5.0)
 
-**Recent additions (v2.1-v2.4):**
+**Recent additions (v2.1-v2.5):**
 - Volume support (default sample volume + per-note velocity)
 - Panning support (default sample panning + optional 8xx automations)
 - Sample Offset support (effect 9xx via Simpler, optional)
+- Volume 00 support (note stop via volume column decoding)
 - Headroom management (-12 dB) to prevent clipping
 
 ## Essential Commands
@@ -408,11 +409,85 @@ create_sample_offset_automation(track, notes, next_id)
 - Must be present in script directory or current directory
 - Contains pre-configured OriginalSimpler with all necessary structure
 
+### 10. Volume 00 Support (v2.5.0)
+
+**Volume 00 (Note Stop):**
+- XM: Volume column value 00 stops the currently playing note on that channel
+- MOD: Effect C00 (Set Volume 00) stops the currently playing note
+- Effect: Shortens the duration of the previous note in Ableton
+- Per-channel: Volume 00 on Ch1 only affects Ch1, not other channels
+
+**XM Volume Column Encoding (CRITICAL):**
+```python
+# FastTracker 2 volume column uses special encoding:
+# 0x00-0x0F: No volume command
+# 0x10-0x50: Set volume (0x10 = vol 0, 0x50 = vol 64)
+# 0x60+: Other commands (slides, panning, etc.)
+
+# MUST decode before using:
+if 0x10 <= volume_raw <= 0x50:
+    decoded_volume = volume_raw - 0x10  # 0x10 → 0, 0x50 → 64
+```
+
+**Implementation:**
+```python
+# 1. Capture volume 00 events (xm_parser.py:108-145)
+decoded_volume = None
+if volume is not None:
+    if 0x10 <= volume <= 0x50:
+        decoded_volume = volume - 0x10
+
+# Capture volume stop events
+if decoded_volume is not None and decoded_volume == 0:
+    notes.append({'is_volume_stop': True, ...})
+
+# 2. Use volume stops for duration calculation (xm_parser.py:411-438)
+for note in channel_notes:
+    if note.get('is_volume_stop'):
+        continue  # Skip, used only for calculation
+
+    # Find next event (note OR volume stop)
+    for next_event in remaining_notes:
+        if next_event.get('is_volume_stop'):
+            note['duration'] = next_event['time'] - note['time']
+            break
+        if not next_event.get('is_volume_stop'):
+            note['duration'] = next_event['time'] - note['time']
+            break
+
+# 3. Filter volume stops before MIDI creation
+# (automatic via 'continue' in step 2)
+```
+
+**MOD Effect C00:**
+```python
+# mod_parser.py:191-204
+elif effect == 0xC and effect_param == 0x00:
+    pattern_data.append({
+        'is_volume_stop': True,
+        'volume': 0,
+        ...
+    })
+```
+
+**Key Bug Fixed:**
+```python
+# WRONG (0 evaluates to False in Python):
+'volume': volume if volume else 64  # ❌ Converts vol 0 → 64!
+
+# CORRECT:
+'volume': 64 if decoded_volume is None else decoded_volume  # ✓
+```
+
+**Test file:**
+- `test-vol00.xm` - 3 volume stop events, demonstrates note shortening
+
 ## When Debugging
 
 Test files that demonstrate specific features:
 - `mec3.xm` - Ping-pong loops, volume variations (v2.2.0)
 - `MEC-pan.xm` - Panning automations (v2.3.0 - created for testing)
+- `test-vol00.xm` - Volume 00 note stops (v2.5.0 - 3 stop events)
 - `242.mod` - Speed=3, BPM=250 calculation
 - `BANG.MOD` - BPM=160 detection
 - `CHURCH22.MOD` - 31 samples format
@@ -420,7 +495,8 @@ Test files that demonstrate specific features:
 
 ## Version History Summary
 
-**v2.4.0 (Current)** - Sample Offset support (effect 9xx via Simpler, optional)
+**v2.5.0 (Current)** - Volume 00 support (note stop via volume column decoding, XM + MOD)
+**v2.4.0** - Sample Offset support (effect 9xx via Simpler, optional)
 **v2.3.0** - Panning support (static + optional automations)
 **v2.2.0** - Volume per note via velocity (Vol-Vel 35%, -12dB headroom)
 **v2.1.0** - Sample default volume support

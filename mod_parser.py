@@ -188,6 +188,20 @@ def read_mod_patterns(f, num_patterns, num_channels):
                         'volume': 64,
                         'sample_offset_xm': sample_offset_xm
                     })
+                # Capturer effet C00 (Set Volume 00 = stop note)
+                elif effect == 0xC and effect_param == 0x00:
+                    pattern_data.append({
+                        'row': row,
+                        'channel': channel,
+                        'note': None,
+                        'period': 0,
+                        'sample': 0,
+                        'effect': effect,
+                        'effect_param': effect_param,
+                        'volume': 0,
+                        'sample_offset_xm': None,
+                        'is_volume_stop': True
+                    })
 
         patterns.append({
             'number': pattern_num,
@@ -324,7 +338,8 @@ def extract_samples_and_patterns(mod_path, samples_dir):
                         'loop_start': loop_start,
                         'loop_length': loop_length,
                         'loop_type': loop_type,
-                        'volume': sample_info['volume']
+                        'volume': sample_info['volume'],
+                        'length': sample_info['length']  # Longueur en samples (pour effet 9xx)
                     })
 
         # Extraire Speed et BPM depuis les effets F dans les patterns
@@ -383,12 +398,22 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
         for note_event in pattern['data']:
             row = note_event['row']
             channel = note_event['channel']
-            sample_num = note_event['sample']
-            midi_note = note_event['note']
-            velocity = int((note_event['volume'] / 64.0) * 127)
 
             # Calculer le temps absolu (en beats)
             absolute_time = current_time + (row / 4.0)
+
+            # Si c'est un événement volume stop (effet C00)
+            if note_event.get('is_volume_stop'):
+                notes_by_channel[channel].append({
+                    'time': absolute_time,
+                    'is_volume_stop': True
+                })
+                continue  # Passer au suivant
+
+            # Code pour les vraies notes
+            sample_num = note_event['sample']
+            midi_note = note_event['note']
+            velocity = int((note_event['volume'] / 64.0) * 127)
 
             # Extraire le sample offset si effet 9xx est présent
             sample_offset_xm = note_event.get('sample_offset_xm')  # Déjà extrait par le parser
@@ -411,12 +436,33 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
         channel_notes.sort(key=lambda n: n['time'])
 
         for i, note in enumerate(channel_notes):
-            if i + 1 < len(channel_notes):
-                next_note_time = channel_notes[i + 1]['time']
-                interval = next_note_time - note['time']
-                note['duration'] = min(interval, 4.0)  # Max 4 beats
+            # Ignorer les événements volume stop (utilisés juste pour calcul)
+            if note.get('is_volume_stop'):
+                continue
+
+            # Chercher le prochain événement (note OU volume stop)
+            next_event_time = None
+            for j in range(i + 1, len(channel_notes)):
+                next_event = channel_notes[j]
+
+                # Volume stop coupe la note immédiatement
+                if next_event.get('is_volume_stop'):
+                    next_event_time = next_event['time']
+                    break
+
+                # Nouvelle note coupe aussi
+                if not next_event.get('is_volume_stop'):
+                    next_event_time = next_event['time']
+                    break
+
+            # Calculer la durée
+            if next_event_time is not None:
+                interval = next_event_time - note['time']
+                # Limiter à 4 beats max pour la lisibilité
+                note['duration'] = min(interval, 4.0)
             else:
-                note['duration'] = 4.0  # Dernière note
+                # Dernière note : durée par défaut de 4 beats
+                note['duration'] = 4.0
 
             # Ajouter à la structure finale
             tracks[channel][note['instrument']].append({

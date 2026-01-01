@@ -76,17 +76,17 @@ def batch_convert(directory, template_path=None, recursive=True, enable_pan_auto
         # Chercher le template dans plusieurs endroits
         script_dir = os.path.dirname(os.path.abspath(__file__))
         template_next_to_script = os.path.join(script_dir, "template_100_tracks.als")
-        default_template = "/Users/sam/Music/Compo/All Compo/Modules/template_100_tracks.als"
+        current_dir_template = "./template_100_tracks.als"
 
         if os.path.exists(template_next_to_script):
             template_path = template_next_to_script
-        elif os.path.exists(default_template):
-            template_path = default_template
+        elif os.path.exists(current_dir_template):
+            template_path = current_dir_template
         else:
             print("❌ ERREUR: Template non trouvé!")
             print(f"   Cherché dans:")
             print(f"   - {template_next_to_script}")
-            print(f"   - {default_template}")
+            print(f"   - {current_dir_template}")
             print(f"\n💡 Spécifiez le chemin du template avec --template")
             return False
 
@@ -244,7 +244,7 @@ Exemples:
   python3 batch_convert.py .
 
   # Convertir tous les fichiers d'un répertoire spécifique
-  python3 batch_convert.py "/Users/sam/Music/Compo/All Compo/Modules"
+  python3 batch_convert.py "/path/to/modules"
 
   # Convertir sans recherche récursive (uniquement le répertoire principal)
   python3 batch_convert.py "/path/to/modules" --no-recursive
