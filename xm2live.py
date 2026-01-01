@@ -35,6 +35,9 @@ from mod_parser import (
     organize_tracks_by_channel as organize_mod
 )
 
+# Importer le template minimal embarqué
+from minimal_template import get_minimal_template_root
+
 def update_all_ids(element, next_id):
     """
     Met à jour tous les attributs Id dans l'élément et ses enfants.
@@ -1375,6 +1378,139 @@ def configure_envelope_adsr(sampler, envelope_info, bpm, speed):
     return True
 
 
+def generate_als_with_n_tracks(num_tracks):
+    """Génère un fichier .als temporaire avec N pistes à partir du template minimal embarqué
+
+    Args:
+        num_tracks: Nombre de pistes MIDI nécessaires
+
+    Returns:
+        Chemin du fichier .als créé, ou None en cas d'erreur
+    """
+    import gzip
+    import tempfile
+    from lxml import etree
+    from copy import deepcopy
+
+    print(f"🏗️  Génération d'un template avec {num_tracks} pistes (template embarqué)...")
+
+    # Créer un fichier temporaire
+    temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.als', delete=False)
+    output_path = temp_file.name
+    temp_file.close()
+
+    try:
+        # Charger le template minimal embarqué (1 piste)
+        root = get_minimal_template_root()
+
+        # Trouver la MidiTrack unique
+        midi_tracks = root.findall('.//MidiTrack')
+        if len(midi_tracks) != 1:
+            print(f"❌ Erreur: template minimal doit contenir exactement 1 piste (trouvé: {len(midi_tracks)})")
+            os.unlink(output_path)
+            return None
+
+        template_track = midi_tracks[0]
+
+        if num_tracks == 1:
+            # Pas besoin de dupliquer
+            print(f"   ✓ 1 piste (pas de duplication nécessaire)")
+            xml_str = etree.tostring(root, encoding='UTF-8', xml_declaration=True)
+            with gzip.open(output_path, 'wb', compresslevel=9) as f:
+                f.write(xml_str)
+            return output_path
+
+        # Trouver le parent des MidiTrack (Tracks)
+        tracks_parent = root.find('.//Tracks')
+        if tracks_parent is None:
+            print("❌ Impossible de trouver l'élément <Tracks>!")
+            os.unlink(output_path)
+            return None
+
+        # Trouver l'index de la première ReturnTrack (on va insérer AVANT)
+        return_track = tracks_parent.find('.//ReturnTrack')
+        if return_track is None:
+            insert_index = len(list(tracks_parent))
+        else:
+            insert_index = list(tracks_parent).index(return_track)
+
+        # Collecter tous les IDs existants
+        existing_ids = set()
+        for elem in root.iter():
+            if 'Id' in elem.attrib:
+                try:
+                    existing_ids.add(int(elem.attrib['Id']))
+                except (ValueError, TypeError):
+                    pass
+
+        next_id = max(existing_ids) + 1 if existing_ids else 100000
+
+        # Dupliquer la piste (num_tracks - 1) fois
+        tracks_to_add = num_tracks - 1
+        print(f"   Duplication de la piste template {tracks_to_add} fois...")
+
+        for i in range(tracks_to_add):
+            # Créer une copie profonde de la piste template
+            new_track = deepcopy(template_track)
+
+            # Mettre à jour le nom
+            name_elem = new_track.find('.//Name/EffectiveName')
+            if name_elem is not None:
+                new_name = f"Track {i + 2}"
+                name_elem.set('Value', new_name)
+
+            # Régénérer tous les IDs
+            for elem in new_track.iter():
+                if 'Id' in elem.attrib:
+                    try:
+                        int(elem.attrib['Id'])  # Vérifier que c'est un nombre
+                        elem.attrib['Id'] = str(next_id)
+                        next_id += 1
+                    except (ValueError, TypeError):
+                        pass
+
+            # Insérer AVANT les ReturnTrack
+            # insert() insère AVANT l'index, donc:
+            # i=0 → insert_index (décale ReturnTrack vers la droite)
+            # i=1 → insert_index+1 (après la première piste ajoutée)
+            # etc.
+            tracks_parent.insert(insert_index + i, new_track)
+
+            # Progression
+            if (i + 1) % 50 == 0 or (i + 1) == tracks_to_add:
+                print(f"   {i + 1}/{tracks_to_add} pistes ajoutées...")
+
+        # Mettre à jour NextPointeeId
+        next_pointee_elem = root.find('.//NextPointeeId')
+        if next_pointee_elem is not None:
+            next_pointee_elem.set('Value', str(next_id))
+
+        # Vérifier le nombre total de pistes
+        total_tracks = len(root.findall('.//MidiTrack'))
+        print(f"   ✓ {total_tracks} pistes créées")
+
+        if total_tracks != num_tracks:
+            print(f"   ⚠️  ATTENTION: {total_tracks} pistes au lieu de {num_tracks}!")
+
+        # Sauvegarder le fichier .als
+        print(f"   Compression et sauvegarde...")
+        xml_str = etree.tostring(root, encoding='UTF-8', xml_declaration=True)
+
+        with gzip.open(output_path, 'wb', compresslevel=9) as f:
+            f.write(xml_str)
+
+        size_kb = os.path.getsize(output_path) / 1024
+        print(f"   ✓ Fichier créé: {size_kb:.1f} KB")
+
+        return output_path
+
+    except Exception as e:
+        print(f"❌ Erreur lors de la génération: {e}")
+        if os.path.exists(output_path):
+            os.unlink(output_path)
+        return None
+
+
 def create_template_with_n_tracks(base_template_path, output_path, num_tracks):
     """Crée un template Ableton avec N pistes MIDI à partir d'un template de base
 
@@ -1674,10 +1810,10 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
 
     print(f"\n🎹 {num_tracks_needed} pistes nécessaires")
 
-    # Obtenir ou créer le template avec le bon nombre de pistes
+    # Obtenir ou générer le template avec le bon nombre de pistes
     if template_path is None:
-        # Créer automatiquement un template avec le nombre de pistes nécessaire
-        template_path = get_or_create_template(num_tracks_needed)
+        # Générer dynamiquement un template avec le nombre exact de pistes
+        template_path = generate_als_with_n_tracks(num_tracks_needed)
         if template_path is None:
             return False
     else:
