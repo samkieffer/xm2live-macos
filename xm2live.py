@@ -1922,16 +1922,16 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
             all_notes_lists = [track['notes'] for track in instrument_tracks]
             merged_notes = merge_and_deduplicate_notes(all_notes_lists)
 
-            # Créer la piste ALL (SANS instrument, marquée spécialement)
+            # Créer la piste ALL (avec instrument comme les autres)
             all_track = {
                 'instrument': instrument,
                 'channel': None,  # Pas de canal spécifique
                 'sample': sample,
                 'notes': merged_notes,
-                'track_name': f"ALL - {sample_name}",
+                'track_name': "All notes",  # Nom simple et repérable
                 'sample_name': sample_name,
-                'color': instrument_colors[instrument],
-                'is_merge_track': True  # Marqueur pour ne PAS ajouter d'instrument
+                'color': instrument_colors[instrument]
+                # Pas de marqueur is_merge_track : traité comme piste normale
             }
 
             # Ajouter la piste ALL EN PREMIER
@@ -1985,40 +1985,22 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         update_track_name(track, track_info['track_name'])
         update_track_color(track, track_info['color'])
 
-        # Vérifier si c'est une piste de merge (ALL)
-        is_merge_track = track_info.get('is_merge_track', False)
-
+        # Toutes les pistes (y compris ALL) ont un instrument
         automation_target_id = None
-        use_simpler = False  # Par défaut False
+        instrument = track_info['instrument']
+        use_simpler = (enable_sample_offset and instrument in instruments_with_9xx)
 
-        if is_merge_track:
-            # Piste ALL: Supprimer le Sampler/Simpler, garder seulement les notes
-            # Trouver le device_chain qui contient les devices
-            device_chain = track.element.find('.//DeviceChain/DeviceChain')
-            if device_chain is not None:
-                # Supprimer MultiSampler et OriginalSimpler (chercher parmi les enfants directs)
-                for child in list(device_chain):
-                    if child.tag == 'MultiSampler' or child.tag == 'OriginalSimpler':
-                        device_chain.remove(child)
-
-            # Ajouter les notes MIDI
-            update_midi_clip_notes(track, track_info['notes'])
+        if use_simpler:
+            # Utiliser Simpler (pour effet 9xx)
+            global_next_id, automation_target_id = populate_track_with_simpler(track, track_info['sample'], output_dir, global_next_id,
+                                       bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
         else:
-            # Piste normale: ajouter Sampler ou Simpler
-            instrument = track_info['instrument']
-            use_simpler = (enable_sample_offset and instrument in instruments_with_9xx)
+            # Utiliser Sampler (normal)
+            update_sampler_sample(track, track_info['sample'], output_dir, template_sample_part,
+                                bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
 
-            if use_simpler:
-                # Utiliser Simpler (pour effet 9xx)
-                global_next_id, automation_target_id = populate_track_with_simpler(track, track_info['sample'], output_dir, global_next_id,
-                                           bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
-            else:
-                # Utiliser Sampler (normal)
-                update_sampler_sample(track, track_info['sample'], output_dir, template_sample_part,
-                                    bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
-
-            # Ajouter les notes MIDI
-            update_midi_clip_notes(track, track_info['notes'])
+        # Ajouter les notes MIDI
+        update_midi_clip_notes(track, track_info['notes'])
 
         # Collecter les données pour l'automation Sample Start (si activé et Simpler)
         if use_simpler and enable_sample_offset and automation_target_id:
