@@ -1378,6 +1378,39 @@ def configure_envelope_adsr(sampler, envelope_info, bpm, speed):
     return True
 
 
+def merge_and_deduplicate_notes(notes_lists):
+    """Fusionne plusieurs listes de notes et déduplique les notes identiques au même moment
+
+    Args:
+        notes_lists: Liste de listes de notes à fusionner
+
+    Returns:
+        Liste de notes fusionnées et triées par temps, sans doublons
+    """
+    # Fusionner toutes les notes
+    all_notes = []
+    for notes in notes_lists:
+        all_notes.extend(notes)
+
+    # Trier par temps
+    all_notes.sort(key=lambda x: x['time'])
+
+    # Dédupliquer: si 2 notes ont même temps et même note MIDI, garder une seule
+    deduplicated = []
+    seen = set()
+
+    for note in all_notes:
+        # Clé unique: (temps, note MIDI)
+        # On arrondit le temps à 4 décimales pour éviter les problèmes de float
+        key = (round(note['time'], 4), note['note'])
+
+        if key not in seen:
+            seen.add(key)
+            deduplicated.append(note)
+
+    return deduplicated
+
+
 def generate_als_with_n_tracks(num_tracks):
     """Génère un fichier .als temporaire avec N pistes à partir du template minimal embarqué
 
@@ -1675,7 +1708,7 @@ def get_or_create_template(num_tracks_needed):
     return output_path
 
 
-def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_pan_automation=False, enable_envelope=False, enable_sample_offset=False):
+def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_pan_automation=False, enable_envelope=False, enable_sample_offset=False, enable_merge_tracks=False):
     """Convertit un fichier XM/MOD en projet Ableton
 
     Args:
@@ -1866,13 +1899,14 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         inst_hex = f"{instrument:02X}"
         sample_name = sample['name'].strip() if sample['name'].strip() else f"Instrument_{inst_hex}_Sample_1"
 
-        # Trouver toutes les pistes (canaux) qui utilisent cet instrument
+        # Collecter toutes les pistes (canaux) qui utilisent cet instrument
+        instrument_tracks = []
         for channel in sorted(tracks_data.keys()):
             if instrument in tracks_data[channel]:
                 notes = tracks_data[channel][instrument]
                 track_name = f"Ch{channel+1} - {sample_name}"
 
-                tracks_to_create.append({
+                instrument_tracks.append({
                     'instrument': instrument,
                     'channel': channel,
                     'sample': sample,
@@ -1881,6 +1915,52 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
                     'sample_name': sample_name,
                     'color': instrument_colors[instrument]
                 })
+
+        # Si --merge-tracks activé ET plusieurs pistes pour cet instrument, créer une piste ALL
+        if enable_merge_tracks and len(instrument_tracks) > 1:
+            # Fusionner toutes les notes de cet instrument
+            all_notes_lists = [track['notes'] for track in instrument_tracks]
+            merged_notes = merge_and_deduplicate_notes(all_notes_lists)
+
+            # Créer la piste ALL (SANS instrument, marquée spécialement)
+            all_track = {
+                'instrument': instrument,
+                'channel': None,  # Pas de canal spécifique
+                'sample': sample,
+                'notes': merged_notes,
+                'track_name': f"ALL - {sample_name}",
+                'sample_name': sample_name,
+                'color': instrument_colors[instrument],
+                'is_merge_track': True  # Marqueur pour ne PAS ajouter d'instrument
+            }
+
+            # Ajouter la piste ALL EN PREMIER
+            tracks_to_create.append(all_track)
+
+        # Ajouter les pistes individuelles
+        tracks_to_create.extend(instrument_tracks)
+
+    # Recalculer le nombre de pistes nécessaires APRÈS avoir ajouté les pistes ALL
+    actual_tracks_needed = len(tracks_to_create)
+    if actual_tracks_needed > num_tracks_needed:
+        print(f"   → {actual_tracks_needed - num_tracks_needed} pistes ALL ajoutées (total: {actual_tracks_needed})")
+        num_tracks_needed = actual_tracks_needed
+
+        # Régénérer le template si nécessaire
+        # Vérifier si c'est un template temporaire (commence par /tmp/ ou /var/folders/)
+        import tempfile
+        is_temp_template = template_path and (template_path.startswith('/tmp/') or template_path.startswith(tempfile.gettempdir()))
+        if template_path and os.path.exists(template_path) and is_temp_template:
+            # C'est un template temporaire généré, on peut le remplacer
+            os.unlink(template_path)
+            template_path = generate_als_with_n_tracks(num_tracks_needed)
+            if template_path is None:
+                return False
+            # Recharger le template
+            live_set = LiveSet.from_file(template_path)
+            # Ré-extraire le template sample part
+            first_track = live_set.primary_tracks[0]
+            template_sample_part = first_track.element.find('.//MultiSampler/Player/MultiSampleMap/SampleParts/MultiSamplePart')
 
     # Créer les pistes dans l'ordre
     track_index = 0
@@ -1905,21 +1985,40 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         update_track_name(track, track_info['track_name'])
         update_track_color(track, track_info['color'])
 
-        # Choisir Simpler ou Sampler selon si l'instrument utilise l'effet 9xx
-        instrument = track_info['instrument']
-        use_simpler = (enable_sample_offset and instrument in instruments_with_9xx)
+        # Vérifier si c'est une piste de merge (ALL)
+        is_merge_track = track_info.get('is_merge_track', False)
 
         automation_target_id = None
-        if use_simpler:
-            # Utiliser Simpler (pour effet 9xx)
-            global_next_id, automation_target_id = populate_track_with_simpler(track, track_info['sample'], output_dir, global_next_id,
-                                       bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
-        else:
-            # Utiliser Sampler (normal)
-            update_sampler_sample(track, track_info['sample'], output_dir, template_sample_part,
-                                bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
+        use_simpler = False  # Par défaut False
 
-        update_midi_clip_notes(track, track_info['notes'])
+        if is_merge_track:
+            # Piste ALL: Supprimer le Sampler/Simpler, garder seulement les notes
+            # Trouver le device_chain qui contient les devices
+            device_chain = track.element.find('.//DeviceChain/DeviceChain')
+            if device_chain is not None:
+                # Supprimer MultiSampler et OriginalSimpler (chercher parmi les enfants directs)
+                for child in list(device_chain):
+                    if child.tag == 'MultiSampler' or child.tag == 'OriginalSimpler':
+                        device_chain.remove(child)
+
+            # Ajouter les notes MIDI
+            update_midi_clip_notes(track, track_info['notes'])
+        else:
+            # Piste normale: ajouter Sampler ou Simpler
+            instrument = track_info['instrument']
+            use_simpler = (enable_sample_offset and instrument in instruments_with_9xx)
+
+            if use_simpler:
+                # Utiliser Simpler (pour effet 9xx)
+                global_next_id, automation_target_id = populate_track_with_simpler(track, track_info['sample'], output_dir, global_next_id,
+                                           bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
+            else:
+                # Utiliser Sampler (normal)
+                update_sampler_sample(track, track_info['sample'], output_dir, template_sample_part,
+                                    bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope)
+
+            # Ajouter les notes MIDI
+            update_midi_clip_notes(track, track_info['notes'])
 
         # Collecter les données pour l'automation Sample Start (si activé et Simpler)
         if use_simpler and enable_sample_offset and automation_target_id:
@@ -2275,7 +2374,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='''
 ╔════════════════════════════════════════════════════════════╗
-║     XM2LIVE v2.6.0 - Tracker → Ableton Live Converter     ║
+║     XM2LIVE v2.7.0 - Tracker → Ableton Live Converter     ║
 ╚════════════════════════════════════════════════════════════╝
 
 Convertit les fichiers tracker (FastTracker 2 XM, Amiga MOD) en
@@ -2321,6 +2420,12 @@ SWITCHES DISPONIBLES
                     EXPÉRIMENTAL - ajustements manuels recommandés
                     Par défaut: désactivé
 
+--merge-tracks      Crée une piste de référence "ALL" par instrument
+                    Contient toutes les notes fusionnées (sans dédoublons)
+                    Piste sans instrument, utile comme référence visuelle
+                    Placée en première position dans chaque groupe
+                    Par défaut: désactivé
+
 ════════════════════════════════════════════════════════════
 RÉSULTAT
 ════════════════════════════════════════════════════════════
@@ -2350,17 +2455,26 @@ Documentation complète: README.md
                         help='Activer l\'effet 9xx (Sample Offset) avec Simpler. '
                              'Les instruments avec effet 9xx utiliseront Simpler au lieu de Sampler. '
                              'LIMITATION: conversion ping-pong → forward.')
+    parser.add_argument('--merge-tracks', action='store_true',
+                        help='Créer une piste de référence "ALL" par instrument contenant toutes les notes fusionnées. '
+                             'Piste sans instrument, utile comme référence visuelle.')
 
     args = parser.parse_args()
 
     xm_path = args.fichier
     template_path = args.template  # None si non spécifié, sera auto-créé
 
+    # Fix: Si template_path commence par '--', c'est un flag mal parsé, donc None
+    if template_path and template_path.startswith('--'):
+        template_path = None
+
+
     try:
         success = convert_xm_to_ableton(xm_path, template_path,
                                         enable_pan_automation=args.pan_automation,
                                         enable_envelope=args.envelope,
-                                        enable_sample_offset=args.sample_offset)
+                                        enable_sample_offset=args.sample_offset,
+                                        enable_merge_tracks=args.merge_tracks)
         if success:
             sys.exit(0)
         else:
