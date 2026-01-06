@@ -1411,6 +1411,58 @@ def merge_and_deduplicate_notes(notes_lists):
     return deduplicated
 
 
+def distribute_notes_to_avoid_overlap(merged_notes):
+    """Distribue les notes sur plusieurs pistes pour éviter les chevauchements temporels
+
+    Cette fonction implémente un algorithme de bin-packing pour assigner les notes
+    à différentes pistes de manière à ce qu'aucune note ne chevauche une autre
+    dans la même piste (éviter la polyphonie par piste).
+
+    Args:
+        merged_notes: Liste de notes triées par temps
+
+    Returns:
+        Liste de listes de notes (une liste par piste nécessaire)
+        Exemple: [[notes_piste_1], [notes_piste_2], ...]
+        La première liste correspond à "All notes", les suivantes aux auxiliaires
+    """
+    if not merged_notes:
+        return [[]]
+
+    # Liste de pistes, chaque piste contient des notes
+    tracks = [[]]
+
+    for note in merged_notes:
+        note_start = note['time']
+        note_end = note_start + note['duration']
+
+        # Trouver une piste où cette note ne chevauche aucune note existante
+        placed = False
+        for track in tracks:
+            # Vérifier si la note peut être placée dans cette piste
+            has_overlap = False
+            for existing_note in track:
+                existing_start = existing_note['time']
+                existing_end = existing_start + existing_note['duration']
+
+                # Chevauchement si les intervalles se superposent
+                # Note: on utilise une petite marge (0.001) pour éviter les problèmes de float
+                if not (note_end <= existing_start + 0.001 or note_start >= existing_end - 0.001):
+                    has_overlap = True
+                    break
+
+            if not has_overlap:
+                track.append(note)
+                placed = True
+                break
+
+        # Si aucune piste ne convient, créer une nouvelle piste auxiliaire
+        if not placed:
+            tracks.append([note])
+
+    return tracks
+
+
 def generate_als_with_n_tracks(num_tracks):
     """Génère un fichier .als temporaire avec N pistes à partir du template minimal embarqué
 
@@ -1916,29 +1968,41 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
                     'color': instrument_colors[instrument]
                 })
 
-        # Si --merge-tracks activé ET plusieurs pistes pour cet instrument, créer une piste ALL
-        if enable_merge_tracks and len(instrument_tracks) > 1:
+        # Si --merge-tracks activé, créer uniquement les pistes fusionnées (pas les pistes individuelles)
+        if enable_merge_tracks and len(instrument_tracks) > 0:
             # Fusionner toutes les notes de cet instrument
             all_notes_lists = [track['notes'] for track in instrument_tracks]
             merged_notes = merge_and_deduplicate_notes(all_notes_lists)
 
-            # Créer la piste ALL (avec instrument comme les autres)
-            all_track = {
-                'instrument': instrument,
-                'channel': None,  # Pas de canal spécifique
-                'sample': sample,
-                'notes': merged_notes,
-                'track_name': "All notes",  # Nom simple et repérable
-                'sample_name': sample_name,
-                'color': instrument_colors[instrument]
-                # Pas de marqueur is_merge_track : traité comme piste normale
-            }
+            # Distribuer les notes sur plusieurs pistes pour éviter les chevauchements
+            distributed_tracks = distribute_notes_to_avoid_overlap(merged_notes)
 
-            # Ajouter la piste ALL EN PREMIER
-            tracks_to_create.append(all_track)
+            # Créer la piste "All notes" (première distribution) + pistes auxiliaires si nécessaire
+            for i, notes_for_track in enumerate(distributed_tracks):
+                if len(notes_for_track) == 0:
+                    continue  # Skip empty tracks
 
-        # Ajouter les pistes individuelles
-        tracks_to_create.extend(instrument_tracks)
+                # Nom de la piste: "All notes" pour la première, "All notes (2)", "All notes (3)", etc. pour les auxiliaires
+                if i == 0:
+                    track_name = "All notes"
+                else:
+                    track_name = f"All notes ({i+1})"
+
+                merged_track = {
+                    'instrument': instrument,
+                    'channel': None,  # Pas de canal spécifique
+                    'sample': sample,
+                    'notes': notes_for_track,
+                    'track_name': track_name,
+                    'sample_name': sample_name,
+                    'color': instrument_colors[instrument]
+                }
+
+                tracks_to_create.append(merged_track)
+
+        else:
+            # Mode normal: créer les pistes individuelles par canal
+            tracks_to_create.extend(instrument_tracks)
 
     # Recalculer le nombre de pistes nécessaires APRÈS avoir ajouté les pistes ALL
     actual_tracks_needed = len(tracks_to_create)
@@ -2356,7 +2420,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='''
 ╔════════════════════════════════════════════════════════════╗
-║     XM2LIVE v2.7.0 - Tracker → Ableton Live Converter     ║
+║     XM2LIVE v2.9.0 - Tracker → Ableton Live Converter     ║
 ╚════════════════════════════════════════════════════════════╝
 
 Convertit les fichiers tracker (FastTracker 2 XM, Amiga MOD) en
@@ -2438,8 +2502,8 @@ Documentation complète: README.md
                              'Les instruments avec effet 9xx utiliseront Simpler au lieu de Sampler. '
                              'LIMITATION: conversion ping-pong → forward.')
     parser.add_argument('--merge-tracks', action='store_true',
-                        help='Créer une piste de référence "ALL" par instrument contenant toutes les notes fusionnées. '
-                             'Piste sans instrument, utile comme référence visuelle.')
+                        help='Mode fusion: créer une piste "All notes" par instrument au lieu des pistes individuelles par canal. '
+                             'Détecte automatiquement les chevauchements temporels et crée des pistes auxiliaires si nécessaire.')
 
     args = parser.parse_args()
 
