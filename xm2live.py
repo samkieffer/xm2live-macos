@@ -794,7 +794,8 @@ def add_sample_offset_automations_to_file(als_path, automation_data, next_id):
     Args:
         als_path: Chemin du fichier .als sauvegardé
         automation_data: Liste de dicts avec:
-            - track_name: Nom de la piste
+            - track_name: Nom de la piste (pour affichage uniquement)
+            - track_index: Index de la piste (0-based, pour identification unique)
             - target_id: ID de l'AutomationTarget SampleStart
             - notes: Liste des notes avec time, duration, sample_offset_xm
             - sample_length: Longueur du sample en samples (pour conversion 9xx correcte)
@@ -819,39 +820,28 @@ def add_sample_offset_automations_to_file(als_path, automation_data, next_id):
         # 2. Parser le XML
         root = etree.fromstring(xml_data)
 
-        # 3. Pour chaque piste avec automation
+        # 3. Récupérer toutes les MidiTrack dans l'ordre
+        all_midi_tracks = root.findall('.//LiveSet/Tracks/MidiTrack')
+
+        # 4. Pour chaque piste avec automation
         for data in automation_data:
             track_name = data['track_name']
+            track_index = data['track_index']
             target_id = data['target_id']
             notes = data['notes']
             sample_length = data['sample_length']  # Longueur en samples
 
-            # IMPORTANT: Utiliser findall() car il peut y avoir PLUSIEURS pistes avec le même nom
-            # On doit trouver celle qui contient un OriginalSimpler
-            name_elems = root.findall(f'.//MidiTrack/Name/EffectiveName[@Value="{track_name}"]')
-            if not name_elems:
-                print(f"   ⚠️  Piste '{track_name}' non trouvée")
+            # Utiliser l'index pour accéder directement à la bonne piste
+            if track_index >= len(all_midi_tracks):
+                print(f"   ⚠️  Index {track_index} hors limites (seulement {len(all_midi_tracks)} pistes)")
                 continue
 
-            # Chercher la MidiTrack qui contient un OriginalSimpler
-            midi_track = None
-            for name_elem in name_elems:
-                # Remonter à MidiTrack
-                candidate_track = name_elem
-                while candidate_track is not None and candidate_track.tag != 'MidiTrack':
-                    candidate_track = candidate_track.getparent()
+            midi_track = all_midi_tracks[track_index]
 
-                if candidate_track is None:
-                    continue
-
-                # Vérifier si cette piste contient un OriginalSimpler
-                simpler = candidate_track.find('.//OriginalSimpler')
-                if simpler is not None:
-                    midi_track = candidate_track
-                    break
-
-            if midi_track is None:
-                print(f"   ⚠️  Piste '{track_name}' avec OriginalSimpler non trouvée")
+            # Vérifier que la piste contient bien un OriginalSimpler
+            simpler = midi_track.find('.//OriginalSimpler')
+            if simpler is None:
+                print(f"   ⚠️  Piste #{track_index} '{track_name}' ne contient pas de OriginalSimpler")
                 continue
 
             # Trouver AutomationEnvelopes
@@ -2075,6 +2065,7 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
                 # Collecter les données pour post-processing
                 automation_data_list.append({
                     'track_name': track_info['track_name'],
+                    'track_index': track_index,  # Index de piste pour identification unique
                     'target_id': automation_target_id,
                     'notes': track_info['notes'],
                     'sample_length': track_info['sample']['length']  # Longueur en samples
@@ -2504,6 +2495,10 @@ Documentation complète: README.md
     parser.add_argument('--merge-tracks', action='store_true',
                         help='Mode fusion: créer une piste "All notes" par instrument au lieu des pistes individuelles par canal. '
                              'Détecte automatiquement les chevauchements temporels et crée des pistes auxiliaires si nécessaire.')
+    parser.add_argument('--output', metavar='DIR',
+                        help='Répertoire de sortie du projet Ableton (optionnel). '
+                             'Si non spécifié, le projet est créé à côté du fichier source dans '
+                             '"Conversions Ableton Live/[nom]_Ableton_Project".')
 
     args = parser.parse_args()
 
@@ -2517,6 +2512,7 @@ Documentation complète: README.md
 
     try:
         success = convert_xm_to_ableton(xm_path, template_path,
+                                        output_dir=args.output,
                                         enable_pan_automation=args.pan_automation,
                                         enable_envelope=args.envelope,
                                         enable_sample_offset=args.sample_offset,
