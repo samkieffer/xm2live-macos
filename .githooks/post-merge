@@ -1,0 +1,3 @@
+#!/bin/sh
+# Un merge (y compris fast-forward) ne déclenche pas post-commit : même publication.
+exec "$(dirname "$0")/post-commit"

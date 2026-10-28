@@ -1,0 +1,22 @@
+#!/bin/sh
+# Publie la branche courante sur GitHub après chaque commit, pour garder
+# https://github.com/samkieffer/xm2live-macos (public) en phase avec le dépôt local.
+#
+# Activation (une fois par clone) : git config core.hooksPath .githooks
+# Désactivation ponctuelle      : XM2LIVE_NO_PUSH=1 git commit ...
+#
+# Jamais de push forcé : après un amend ou un rebase de commits déjà publiés,
+# le push est refusé et un avertissement s'affiche (à pousser à la main).
+
+[ -n "$XM2LIVE_NO_PUSH" ] && exit 0
+
+# HEAD détachée (rebase, cherry-pick en cours) : rien à publier
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+
+if output=$(git push --quiet --set-upstream origin "$branch" 2>&1); then
+    echo "↑ $branch publiée sur GitHub"
+else
+    echo "⚠️  Publication de $branch sur GitHub impossible (relancer : git push)" >&2
+    echo "$output" >&2
+fi
+exit 0

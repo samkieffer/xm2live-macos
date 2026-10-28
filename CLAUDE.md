@@ -63,7 +63,17 @@ python3 batch_convert.py /path/to/modules --sample-offset
 pip install -r requirements.txt
 
 # Dependencies: buildable, numpy, lxml
+
+# Enable the git hooks (once per clone)
+git config core.hooksPath .githooks
 ```
+
+### Git and GitHub
+- Remote: `origin` = git@github.com:samkieffer/xm2live-macos.git (**public** repository)
+- `.githooks/post-commit` and `post-merge` push the current branch right after every commit or
+  merge: **a commit is a publication**. Never commit secrets or private data.
+- No force push: after an amend or rebase of published commits, the hook warns and the push has
+  to be done by hand. Skip publishing once with `XM2LIVE_NO_PUSH=1 git commit ...`
 
 ### Testing (run before and after every converter change)
 ```bash
