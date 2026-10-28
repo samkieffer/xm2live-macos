@@ -2,6 +2,41 @@
 
 Historique des versions et modifications du projet.
 
+## [2.10.0] - 2026-10-28
+
+Lot 0 de AUDIT.md : filet de sécurité et corrections rapides.
+
+### Corrigé
+- 🎚️ **Finetune** : il était divisé par deux (`finetune / 2.56` plafonné à ±50 cents). Calcul FT2
+  (16 pas par demi-ton) avec report du demi-ton entier sur RootKey. Sur DISCOTEC.XM, `Baxs.wav` était
+  48 cents trop haut et sa boucle 2,8 % trop rapide. Le finetune MOD (-8..+7) est pris en compte (×16).
+- 🔁 **Boucles des samples 16 bits** : les points de boucle XM sont en octets, désormais divisés par 2
+  (avant : boucles décalées, fin au-delà du sample).
+- 🎹 **Notes sans numéro d'instrument** (XM et MOD) : elles rejouent le dernier instrument du canal
+  au lieu d'être ignorées (SARCOPHA.XM : 61 % de notes récupérées).
+- 🔊 **Effet Cxx** (Set Volume) : devient la vélocité de la note, en XM comme en MOD.
+- 🔇 **Note à volume 0** : traitée comme un arrêt (silencieuse dans le tracker ; Live remonte une vélocité 0 à 1).
+- ⏱️ MOD : un `Fxx` sans note ne coupe plus la note en cours du canal.
+- 🎚️ MOD : `--sample-offset` détecte enfin l'effet 9xx (la détection lisait une clé inexistante).
+- 🎛️ `--envelope` fonctionne de nouveau : `envelope_reader.py` avait été supprimé par erreur le 1er janvier.
+- 📁 Les samples ont des noms fixes préfixés par le numéro d'instrument (`08 Baxswav.wav`) : une
+  reconversion écrase au lieu d'empiler des `_1`, `_2`…
+- 🔏 App Mac : la signature ad hoc échouait silencieusement (attributs Finder sur les templates).
+- 💥 Plantages trouvés en convertissant toute la collection : noms de samples contenant des octets
+  nuls ou des caractères de contrôle (8 XM), speed 0 dans l'en-tête (2 XM), boucles vides ou hors
+  du sample (3 XM, 1 MOD), fichier qui n'est pas un XM (message clair au lieu d'un parsing aberrant).
+
+### Ajouté
+- ✅ `als_validator.py` : vérification du set à la fin de chaque conversion (IDs, automations, samples,
+  boucles, accordage, notes).
+- 🧪 `tools/snapshot.py` : instantanés de non-régression sur 13 modules de référence.
+- 🗂️ `tools/check_collection.py` : conversion et validation de toute la collection (~390 modules).
+- 🎧 `tools/render_reference.py` (rendu OpenMPT calé sur FT2) et `tools/compare_renders.py`
+  (hauteur, timing et niveau, fenêtre par fenêtre).
+- 🔢 Version unique dans `xm2live.py` (`__version__`, `--version`), reprise par l'app et le DMG.
+
+Les versions 2.1 à 2.9 sont décrites dans CLAUDE.md et l'historique git.
+
 ## [2.0.0] - 2025-12-25
 
 ### Ajouté

@@ -1,0 +1,17 @@
+# Modules de référence pour tools/snapshot.py
+# Format : identifiant | chemin relatif au dossier Modules | options xm2live.py
+# Les options par défaut de l'app Mac sont --pan-automation --sample-offset.
+
+discotec      | DISCOTEC.XM          | --pan-automation --sample-offset
+mec3          | MEC3.XM              | --pan-automation --sample-offset
+mec3-merge    | MEC3.XM              | --merge-tracks
+mec-pan       | MEC-pan.xm           | --pan-automation --sample-offset
+mec-envelope  | MEC.XM               | --pan-automation --sample-offset --envelope
+essai5        | ESSAI5.XM            | --pan-automation --sample-offset
+sarcopha      | AMIGA/SARCOPHA.XM    | --pan-automation --sample-offset
+bdtn          | BDTN.XM              | --pan-automation --sample-offset
+bang          | BANG.MOD             | --pan-automation --sample-offset
+242           | 242 DEMO/242.mod     | --pan-automation --sample-offset
+church22      | CHURCH22.MOD         | --pan-automation --sample-offset
+keepcool      | KEEPCOOL.MOD         | --pan-automation --sample-offset
+blood3        | BLOOD3.MOD           | --pan-automation --sample-offset

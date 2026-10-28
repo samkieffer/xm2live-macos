@@ -6,9 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.5.0)
+**Status:** Production-ready (Version 2.10.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
 
-**Recent additions (v2.1-v2.5):**
+**v2.10.0 (2026-10-28):** finetune and 16-bit loop fixes, notes without instrument, Cxx volume,
+volume-0 notes as stops, deterministic sample file names, `--envelope` restored, `.als` validator
+run after every conversion, regression tools in `tools/`. Roadmap: AUDIT.md.
+
+**Earlier additions (v2.1-v2.5):**
 - Volume support (default sample volume + per-note velocity)
 - Panning support (default sample panning + optional 8xx automations)
 - Sample Offset support (effect 9xx via Simpler, optional)
@@ -61,13 +65,26 @@ pip install -r requirements.txt
 # Dependencies: buildable, numpy, lxml
 ```
 
-### Testing
+### Testing (run before and after every converter change)
 ```bash
-# Test files used during development
-python3 xm2live.py "/Users/sam/Music/Compo/All Compo/Modules/mec3.xm"
-python3 xm2live.py "/Users/sam/Music/Compo/All Compo/Modules/BANG.MOD"
-python3 xm2live.py "/Users/sam/Music/Compo/All Compo/Modules/242.mod"
+# Regression: convert the reference modules (tools/regression_set.txt) and diff
+# against the stored snapshots (tools/snapshots/*.json)
+python3 tools/snapshot.py diff
+# After checking that every difference is intended, store the new state
+python3 tools/snapshot.py save
+
+# Convert + validate the whole collection (~390 modules, ~1.5 min): catches crashes
+python3 tools/check_collection.py --jobs 8
+
+# Validate any generated set (also runs automatically at the end of each conversion)
+python3 als_validator.py path/to/project.als
+
+# Audio check: reference render with OpenMPT (matches FT2 to 0 ms / 0 cent),
+# then compare with a WAV exported from Live
+python3 tools/render_reference.py module.xm reference.wav
+python3 tools/compare_renders.py reference.wav live_export.wav
 ```
+Tool details: tools/README.md.
 
 ## Architecture
 
@@ -118,9 +135,9 @@ samples = [{
     'name': str,
     'path': str,  # WAV file path
     'relative_note': int,
-    'finetune': int,  # -128 to +127 (cents)
-    'loop_start': int,
-    'loop_length': int,
+    'finetune': int,  # -128 to +127 (1/128 semitone, XM scale; MOD nibble × 16)
+    'loop_start': int,  # frames (XM 16-bit: header bytes / 2)
+    'loop_length': int,  # frames
     'loop_type': int,  # 0=none, 1=forward, 2=ping-pong
     'volume': int,  # 0-64 (64=100%)
     'panning': int  # 0-255 (0=left, 128=center, 255=right)
@@ -132,11 +149,13 @@ patterns = [{
     'data': [{
         'row': int,
         'channel': int,
-        'note': int,  # MIDI note number
-        'instrument': int,
-        'volume': int,
+        'note': int,  # XM note 1-96 / MIDI note for MOD; None for non-note events
+        'instrument': int,  # None (XM) or 'sample': 0 (MOD) = reuse the channel's last instrument
+        'volume': int,  # 0-64 from vol column or Cxx; None = not set on this row
         'effect': int,
         'effect_param': int
+        # Also: 'is_volume_stop' (vol 00 / C00), 'is_instrument_only' (instrument without note).
+        # organize_tracks_by_channel() resolves instrument and volume per channel in play order.
     }]
 }]
 
@@ -306,17 +325,24 @@ Note without 8xx → Pan returns to center (default)
   - Available with `--envelope` flag (disabled by default)
 - **Panning:** Sample default panning IS supported. Effect 8xx automations available with flag
 - **S3M/IT formats:** NOT supported - only XM and MOD
-- **Dynamic BPM changes:** NOT detected - only first patterns scanned
+- **Song flow and timing (lot 1 of AUDIT.md):** Dxx/Bxx/E6x/EEx, mid-song Fxx, EDx and ECx are
+  NOT handled yet - only the initial tempo is used and patterns are laid end to end
+- **Volume 0 notes:** a note played at volume 0 (vol column 0x10, Cxx C00) becomes a stop event,
+  not a MIDI note (silent in the tracker; Live would raise velocity 0 to 1). Revisit when
+  volume slides are converted (lot 4)
 
 ## File Organization
 
 ```
 xm2live/
-├── xm2live.py          # Main conversion orchestrator
+├── xm2live.py          # Main conversion orchestrator (+ __version__)
 ├── xm_parser.py        # XM format parser
 ├── mod_parser.py       # MOD format parser
+├── envelope_reader.py  # XM volume envelopes (for --envelope)
+├── als_validator.py    # .als consistency checks (run after each conversion)
 ├── batch_convert.py    # Batch conversion script
-├── RESUME_SESSION.md   # Complete session context (READ THIS FIRST)
+├── tools/              # snapshot.py, render_reference.py, compare_renders.py, audit/
+├── AUDIT.md            # Measured state + roadmap (lots 0-4)
 ├── TECHNICAL.md        # Technical details and specifications
 ├── README.md           # User documentation
 └── requirements.txt    # Python dependencies
@@ -326,9 +352,10 @@ xm2live/
 
 Before making any changes, read these files in order:
 
-1. **MODIFICATIONS_LOG.md** - Complete version history with detailed changes (v2.0 → v2.3.0)
+1. **AUDIT.md** (2026-10-28) - Measured state of the converter and the prioritized roadmap (lots 0-4)
 2. **CLAUDE.md** (this file) - Quick reference and critical implementation details
-3. **README.md** - User-facing documentation
+3. **CHANGELOG.md** and git history - Version history
+4. **README.md** - User-facing documentation
 
 ## Project Philosophy
 
@@ -353,6 +380,8 @@ Before making any changes, read these files in order:
 5. **DO NOT** look for `Voices` element - it's `NumVoices`
 6. **DO NOT** add features not explicitly requested
 7. **DO NOT** rewrite working code without a specific bug report
+8. **DO NOT** use XM loop points as frames for 16-bit samples - they are in bytes
+9. **DO NOT** scale finetune to fit ±50 cents - carry whole semitones into RootKey
 
 ### 9. Sample Offset Support (v2.4.0)
 
@@ -482,20 +511,44 @@ elif effect == 0xC and effect_param == 0x00:
 **Test file:**
 - `test-vol00.xm` - 3 volume stop events, demonstrates note shortening
 
+### 11. Finetune and 16-bit Loops (fixed 2026-10-28)
+
+**Finetune → RootKey + Detune** (`finetune_to_root_key_and_detune()` in xm2live.py):
+```python
+# XM finetune: 1/128 semitone, FT2 keeps 16 steps per semitone (finetune >> 3)
+cents = (finetune >> 3) * 6.25          # -128 → -100 cents, +127 → +93.75
+semitones = round(cents / 100)          # Ableton Detune is limited to ±50 cents
+detune = cents - semitones * 100
+root_key = 60 - relative_note - semitones
+```
+- Old formula `finetune / 2.56` clamped to ±50 halved every finetune. Measured on
+  DISCOTEC.XM: Baxs.wav (finetune -117) was +48 cents sharp, so the long loop ran 2.8% fast
+  and drifted up to ~50 ms ahead within each bar (heard as a "BPM problem").
+- MOD finetune (-8..+7, 1/8 semitone) is scaled ×16 in mod_parser.py to share this formula.
+
+**16-bit loops:** XM sample headers store length, loop start and loop length in **bytes**.
+xm_parser.py divides loop points by 2 for 16-bit samples (otherwise loops start too late
+and end beyond the sample end).
+
 ## When Debugging
 
-Test files that demonstrate specific features:
+Test files that demonstrate specific features (the regression set is tools/regression_set.txt):
+- `DISCOTEC.XM` - Finetune up to -128, 16-bit ping-pong loops, EDx, 8xx (FT2 render: ~/Desktop/DISCOTEC-FT2.wav)
 - `mec3.xm` - Ping-pong loops, volume variations (v2.2.0)
 - `MEC-pan.xm` - Panning automations (v2.3.0 - created for testing)
-- `test-vol00.xm` - Volume 00 note stops (v2.5.0 - 3 stop events)
-- `242.mod` - Speed=3, BPM=250 calculation
+- `MEC.XM` - Volume envelopes (`--envelope`), key-offs, EDx
+- `AMIGA/SARCOPHA.XM` - Notes without instrument number (61% of its notes)
+- `BDTN.XM` - Pattern breaks (Dxx), volume-0 notes
+- `242 DEMO/242.mod` - Speed=3, BPM=250 calculation
 - `BANG.MOD` - BPM=160 detection
-- `CHURCH22.MOD` - 31 samples format
-- `divers/` directory - 21 files for batch testing
+- `CHURCH22.MOD`, `KEEPCOOL.MOD`, `BLOOD3.MOD` - 31 samples, heavy Cxx volume use
+- `test-vol00.xm` - not found on disk any more
 
 ## Version History Summary
 
-**v2.5.0 (Current)** - Volume 00 support (note stop via volume column decoding, XM + MOD)
+**v2.10.0 (Current)** - Lot 0 of AUDIT.md: tuning/loop fixes, notes without instrument, Cxx, validator, tools
+**v2.6.0-v2.9.0** - Template-less conversion, --merge-tracks, --output (see git history)
+**v2.5.0** - Volume 00 support (note stop via volume column decoding, XM + MOD)
 **v2.4.0** - Sample Offset support (effect 9xx via Simpler, optional)
 **v2.3.0** - Panning support (static + optional automations)
 **v2.2.0** - Volume per note via velocity (Vol-Vel 35%, -12dB headroom)

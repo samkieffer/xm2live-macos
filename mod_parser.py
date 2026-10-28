@@ -12,6 +12,8 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
+from xm_parser import decode_name
+
 
 # Table de conversion Period → Note MIDI
 # Basée sur les periods standards ProTracker (PAL)
@@ -63,7 +65,7 @@ def read_mod_header(filepath):
     """Lit le header d'un fichier MOD et détermine le format"""
     with open(filepath, 'rb') as f:
         # Lire le titre (20 bytes)
-        title = f.read(20).decode('ascii', errors='ignore').strip('\x00')
+        title = decode_name(f.read(20))
 
         # Chercher la signature à l'offset 1080 pour déterminer le format
         f.seek(1080)
@@ -97,7 +99,7 @@ def read_mod_samples_info(f, num_samples):
 
     for i in range(num_samples):
         # Lire les 30 bytes de sample info
-        name = f.read(22).decode('ascii', errors='ignore').strip('\x00')
+        name = decode_name(f.read(22))
         length = struct.unpack('>H', f.read(2))[0] * 2  # En words -> bytes
         finetune = struct.unpack('B', f.read(1))[0]
         # Finetune est signé sur 4 bits
@@ -160,8 +162,8 @@ def read_mod_patterns(f, num_patterns, num_channels):
                 if effect == 0x09:  # Effet 9xx = Sample Offset
                     sample_offset_xm = effect_param if effect_param is not None else 0
 
-                # Ajouter les notes (si présentes)
-                if period > 0 and sample > 0:
+                # Ajouter les notes (sans numéro de sample, le canal rejoue son dernier sample)
+                if period > 0:
                     midi_note = period_to_midi(period)
                     if midi_note:
                         pattern_data.append({
@@ -169,10 +171,11 @@ def read_mod_patterns(f, num_patterns, num_channels):
                             'channel': channel,
                             'note': midi_note,
                             'period': period,
-                            'sample': sample,
+                            'sample': sample,  # 0 = sample du canal
                             'effect': effect,
                             'effect_param': effect_param,
-                            'volume': 64,  # Volume par défaut
+                            # Effet Cxx = volume de la note ; None = pas de volume explicite
+                            'volume': min(effect_param, 64) if effect == 0xC else None,
                             'sample_offset_xm': sample_offset_xm
                         })
                 # Aussi capturer les effets F (Set Speed/Tempo) même sans note
@@ -201,6 +204,15 @@ def read_mod_patterns(f, num_patterns, num_channels):
                         'volume': 0,
                         'sample_offset_xm': None,
                         'is_volume_stop': True
+                    })
+                # Sample sans note : devient le sample du canal pour les notes suivantes
+                elif sample > 0:
+                    pattern_data.append({
+                        'row': row,
+                        'channel': channel,
+                        'note': None,
+                        'sample': sample,
+                        'is_instrument_only': True
                     })
 
         patterns.append({
@@ -244,7 +256,7 @@ def extract_samples_and_patterns(mod_path, samples_dir):
 
     with open(mod_path, 'rb') as f:
         # Lire le titre (20 bytes)
-        title = f.read(20).decode('ascii', errors='ignore').strip('\x00')
+        title = decode_name(f.read(20))
 
         # Lire les infos des samples (31 samples, même si format 15)
         samples_info = read_mod_samples_info(f, 31)
@@ -307,26 +319,24 @@ def extract_samples_and_patterns(mod_path, samples_dir):
                 if not safe_name:
                     safe_name = f'Sample_{i+1:02d}'
 
-                wav_path = os.path.join(samples_dir, f'{safe_name}.wav')
-
-                # Éviter les collisions de noms
-                counter = 1
-                while os.path.exists(wav_path):
-                    wav_path = os.path.join(samples_dir, f'{safe_name}_{counter}.wav')
-                    counter += 1
+                # Nom fixe préfixé par le numéro de sample (hexa, comme dans ProTracker) :
+                # unique par construction, une reconversion écrase au lieu d'empiler
+                wav_name = f'{i+1:02X} {safe_name}.wav'
+                wav_path = os.path.join(samples_dir, wav_name)
 
                 if save_sample_as_wav(sample_data, wav_path):
-                    print(f"    ✓ {safe_name}.wav")
+                    print(f"    ✓ {wav_name}")
 
                     # Déterminer le type de loop
                     loop_type = 0  # Pas de loop par défaut
                     loop_start = 0
                     loop_length = 0
 
-                    if sample_info['repeat_length'] > 2:  # Loop actif si > 1 word
+                    # Loop actif si > 1 word, et ramené dans le sample (valeurs parfois corrompues)
+                    if sample_info['repeat_length'] > 2 and sample_info['repeat_start'] < len(sample_data):
                         loop_type = 1  # Forward loop (MOD n'a pas de ping-pong)
                         loop_start = sample_info['repeat_start']
-                        loop_length = sample_info['repeat_length']
+                        loop_length = min(sample_info['repeat_length'], len(sample_data) - loop_start)
 
                     samples.append({
                         'instrument': i + 1,
@@ -334,7 +344,8 @@ def extract_samples_and_patterns(mod_path, samples_dir):
                         'name': safe_name,
                         'path': wav_path,
                         'relative_note': 0,  # MOD utilise finetune, pas relative_note
-                        'finetune': sample_info['finetune'],
+                        # Finetune MOD (-8..+7, en 1/8 de demi-ton) → échelle XM (1/128 de demi-ton)
+                        'finetune': sample_info['finetune'] * 16,
                         'loop_start': loop_start,
                         'loop_length': loop_length,
                         'loop_type': loop_type,
@@ -389,6 +400,11 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
     notes_by_channel = defaultdict(list)
     current_time = 0.0
 
+    # État de chaque canal, suivi dans l'ordre de lecture : une note sans numéro de sample
+    # rejoue le dernier sample du canal et garde son volume courant
+    channel_sample = {}
+    channel_volume = {}
+
     for pattern_idx in pattern_order:
         if pattern_idx >= len(patterns):
             continue
@@ -402,18 +418,48 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
             # Calculer le temps absolu (en beats)
             absolute_time = current_time + (row / 4.0)
 
+            # Sample seul : remet aussi le volume par défaut du sample
+            if note_event.get('is_instrument_only'):
+                channel_sample[channel] = note_event['sample']
+                channel_volume[channel] = 64
+                continue
+
             # Si c'est un événement volume stop (effet C00)
             if note_event.get('is_volume_stop'):
                 notes_by_channel[channel].append({
                     'time': absolute_time,
                     'is_volume_stop': True
                 })
+                channel_volume[channel] = 0
                 continue  # Passer au suivant
 
+            # Effet F sans note : ne doit pas couper la note en cours
+            if note_event['note'] is None:
+                continue
+
             # Code pour les vraies notes
-            sample_num = note_event['sample']
+            sample_num = note_event['sample'] or channel_sample.get(channel)
+            if not sample_num:
+                continue  # Aucun sample encore choisi sur ce canal
+            channel_sample[channel] = sample_num
             midi_note = note_event['note']
-            velocity = int((note_event['volume'] / 64.0) * 127)
+
+            # Volume explicite (Cxx), sinon défaut du sample si le sample est indiqué,
+            # sinon volume courant du canal
+            volume = note_event['volume']
+            if volume is None:
+                volume = 64 if note_event['sample'] else channel_volume.get(channel, 64)
+            channel_volume[channel] = volume
+
+            # Note jouée à volume 0 (C00) : inaudible dans ProTracker → simple arrêt
+            if volume == 0:
+                notes_by_channel[channel].append({
+                    'time': absolute_time,
+                    'is_volume_stop': True
+                })
+                continue
+
+            velocity = int((volume / 64.0) * 127)
 
             # Extraire le sample offset si effet 9xx est présent
             sample_offset_xm = note_event.get('sample_offset_xm')  # Déjà extrait par le parser

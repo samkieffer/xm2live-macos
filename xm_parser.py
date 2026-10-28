@@ -13,6 +13,12 @@ from pathlib import Path
 from collections import defaultdict
 
 
+def decode_name(raw):
+    """Texte lisible d'un champ nom du module (sans octets nuls ni caractères de contrôle,
+    que le XML d'Ableton refuse)"""
+    return ''.join(c for c in raw.decode('ascii', errors='ignore') if c.isprintable())
+
+
 def read_xm_header(filepath):
     """Lit les infos de base du fichier XM"""
     with open(filepath, 'rb') as f:
@@ -112,8 +118,12 @@ def parse_pattern_data(data, num_rows, num_channels):
                     decoded_volume = volume - 0x10  # 0x10 -> 0, 0x50 -> 64
                 # Ignorer les autres valeurs (0x00-0x0F, 0x60+ sont des commandes spéciales)
 
-            # Si on a une note valide et un instrument
-            if note and note > 0 and note < 97 and instrument and instrument > 0:
+            # Effet Cxx (Set Volume) : FT2 l'applique après la colonne volume, il est donc prioritaire
+            if effect_type == 0x0C:
+                decoded_volume = min(effect_param or 0, 64)
+
+            # Si on a une note valide (sans instrument, le canal rejoue son dernier instrument)
+            if note and note > 0 and note < 97:
                 # Extraire le sample offset si effet 9xx est présent
                 sample_offset_xm = None
                 if effect_type == 0x09:  # Effet 9xx = Sample Offset
@@ -123,8 +133,8 @@ def parse_pattern_data(data, num_rows, num_channels):
                     'row': row,
                     'channel': channel,
                     'note': note,
-                    'instrument': instrument,
-                    'volume': 64 if decoded_volume is None else decoded_volume,
+                    'instrument': instrument or None,  # None = instrument du canal
+                    'volume': decoded_volume,  # None = pas de volume explicite
                     'effect_type': effect_type,
                     'effect_param': effect_param,
                     'sample_offset_xm': sample_offset_xm
@@ -142,6 +152,16 @@ def parse_pattern_data(data, num_rows, num_channels):
                     'effect_param': None,
                     'sample_offset_xm': None,
                     'is_volume_stop': True
+                })
+
+            # Instrument sans note : devient l'instrument du canal pour les notes suivantes
+            elif instrument:
+                notes.append({
+                    'row': row,
+                    'channel': channel,
+                    'note': None,
+                    'instrument': instrument,
+                    'is_instrument_only': True
                 })
 
     return notes
@@ -193,7 +213,10 @@ def extract_samples_and_patterns(xm_path, samples_dir):
     with open(xm_path, 'rb') as f:
         # Lire le header principal
         id_text = f.read(17)
-        module_name = f.read(20).decode('ascii', errors='ignore').strip('\x00')
+        if not id_text.startswith(b'Extended Module'):
+            print(f"❌ Ce n'est pas un fichier FastTracker 2 XM (en-tête: {id_text[:16]!r})")
+            return samples, patterns, xm_info
+        module_name = decode_name(f.read(20))
         f.read(1)  # 0x1a
         tracker_name = f.read(20)
         version = struct.unpack('<H', f.read(2))[0]
@@ -212,8 +235,8 @@ def extract_samples_and_patterns(xm_path, samples_dir):
         xm_info = {
             'name': module_name,
             'channels': num_channels,
-            'tempo': default_tempo,  # Speed (ticks par row)
-            'bpm': default_bpm,
+            'tempo': default_tempo or 6,  # Speed (ticks par row) ; 0 invalide → défaut FT2
+            'bpm': default_bpm or 125,
             'pattern_order': pattern_order,
             'song_length': song_length
         }
@@ -233,7 +256,7 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                 if inst_header_size < 29:
                     continue
 
-                inst_name = f.read(22).decode('ascii', errors='ignore').strip('\x00')
+                inst_name = decode_name(f.read(22))
                 inst_type = struct.unpack('<B', f.read(1))[0]
                 num_samples = struct.unpack('<H', f.read(2))[0]
 
@@ -258,7 +281,7 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                         panning = struct.unpack('<B', f.read(1))[0]
                         relative_note = struct.unpack('<b', f.read(1))[0]
                         reserved = struct.unpack('<B', f.read(1))[0]
-                        sample_name = f.read(22).decode('ascii', errors='ignore').strip('\x00')
+                        sample_name = decode_name(f.read(22))
 
                         sample_headers.append({
                             'length': sample_len,
@@ -268,7 +291,7 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                             'type': sample_type,
                             'name': sample_name or inst_name or f"Sample_{inst_num+1}_{j+1}",
                             'relative_note': relative_note,
-                            'finetune': finetune,  # -128 à +127 (centièmes de demi-ton)
+                            'finetune': finetune,  # -128 à +127 (1/128 de demi-ton)
                             'panning': panning  # 0-255 (0=gauche, 128=centre, 255=droite)
                         })
 
@@ -297,18 +320,13 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                                         decoded[k] = current
 
                                 # Save as WAV
+                                # Nom fixe préfixé par le numéro d'instrument (hexa, comme dans FT2) :
+                                # unique par construction, une reconversion écrase au lieu d'empiler
                                 safe_name = "".join(c for c in header['name'] if c.isalnum() or c in (' ', '_', '-', ',')).strip()
-                                if not safe_name:
-                                    # Utiliser la notation hexadécimale pour les instruments
-                                    inst_hex = f"{inst_num+1:02X}"
-                                    safe_name = f"Instrument_{inst_hex}_Sample_{j+1}"
+                                prefix = f"{inst_num+1:02X}" if num_samples == 1 else f"{inst_num+1:02X}-{j+1}"
+                                safe_name = f"{prefix} {safe_name or 'Sample'}"
 
                                 wav_path = os.path.join(samples_dir, f"{safe_name}.wav")
-
-                                counter = 1
-                                while os.path.exists(wav_path):
-                                    wav_path = os.path.join(samples_dir, f"{safe_name}_{counter}.wav")
-                                    counter += 1
 
                                 with wave.open(wav_path, 'w') as wav:
                                     wav.setnchannels(1)
@@ -316,16 +334,25 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                                     wav.setframerate(8363)
                                     wav.writeframes(decoded.tobytes())
 
+                                # Le XM stocke les boucles en octets : /2 pour obtenir des frames en 16-bit
+                                loop_start = header['loop_start'] // 2 if is_16bit else header['loop_start']
+                                loop_length = header['loop_length'] // 2 if is_16bit else header['loop_length']
+                                loop_type = header['type'] & 0x03  # Bits 0-1: 0=off, 1=forward, 2=ping-pong
+                                # Comme FT2 : boucle ramenée dans le sample, désactivée si vide
+                                loop_length = min(loop_length, len(decoded) - loop_start)
+                                if loop_length <= 0:
+                                    loop_type, loop_start, loop_length = 0, 0, 0
+
                                 samples.append({
                                     'instrument': inst_num + 1,
                                     'sample': j + 1,
                                     'name': header['name'],
                                     'path': wav_path,
                                     'relative_note': header['relative_note'],
-                                    'finetune': header['finetune'],  # -128 à +127 (centièmes de demi-ton)
-                                    'loop_start': header['loop_start'],
-                                    'loop_length': header['loop_length'],
-                                    'loop_type': header['type'] & 0x03,  # Bits 0-1: 0=off, 1=forward, 2=ping-pong
+                                    'finetune': header['finetune'],  # -128 à +127 (1/128 de demi-ton)
+                                    'loop_start': loop_start,
+                                    'loop_length': loop_length,
+                                    'loop_type': loop_type,
                                     'volume': header['volume'],
                                     'panning': header['panning'],  # 0-255 (0=gauche, 128=centre, 255=droite)
                                     'length': len(decoded)  # Longueur en samples (pour effet 9xx)
@@ -352,6 +379,11 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
     # D'abord, collecter toutes les notes par canal (pour calculer les durées)
     notes_by_channel = defaultdict(list)
 
+    # État de chaque canal, suivi dans l'ordre de lecture : une note sans instrument
+    # rejoue le dernier instrument du canal et garde son volume courant
+    channel_instrument = {}
+    channel_volume = {}
+
     # Parcourir les patterns dans l'ordre de la song
     current_time = 0.0
 
@@ -369,23 +401,49 @@ def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
             time_in_pattern = row / 4.0
             absolute_time = current_time + time_in_pattern
 
+            # Instrument seul : remet aussi le volume par défaut du sample
+            if note_event.get('is_instrument_only'):
+                channel_instrument[channel] = note_event['instrument']
+                channel_volume[channel] = 64
+                continue
+
             # Si c'est un événement volume stop (volume 00)
             if note_event.get('is_volume_stop'):
                 notes_by_channel[channel].append({
                     'time': absolute_time,
                     'is_volume_stop': True
                 })
+                channel_volume[channel] = 0
                 continue  # Passer au suivant
 
             # Code pour les vraies notes
-            instrument = note_event['instrument']
+            instrument = note_event['instrument'] or channel_instrument.get(channel)
+            if instrument is None:
+                continue  # Aucun instrument encore choisi sur ce canal : FT2 ne joue rien
+            channel_instrument[channel] = instrument
+
+            # Volume explicite (colonne volume ou Cxx), sinon défaut du sample si l'instrument
+            # est indiqué, sinon volume courant du canal
+            volume = note_event['volume']
+            if volume is None:
+                volume = 64 if note_event['instrument'] else channel_volume.get(channel, 64)
+            channel_volume[channel] = volume
+
+            # Note jouée à volume 0 : inaudible dans FT2 (tant que les glissements de volume
+            # ne sont pas convertis), Live remonterait une vélocité 0 à 1 → simple arrêt
+            if volume == 0:
+                notes_by_channel[channel].append({
+                    'time': absolute_time,
+                    'is_volume_stop': True
+                })
+                continue
 
             # Convertir la note XM (1-96) en MIDI (0-127)
             # Note 1 = C-0, Note 49 = C-4 (middle C = MIDI 60)
             midi_note = note_event['note'] - 1 + 12  # Ajustement
 
             # Velocity depuis volume (0-64 -> 0-127)
-            velocity = min(127, note_event['volume'] * 2)
+            velocity = min(127, volume * 2)
 
             # Extraire le panning si effet 8xx est présent
             panning_xm = None

@@ -38,6 +38,12 @@ from mod_parser import (
 # Importer le template minimal embarqué
 from minimal_template import get_minimal_template_root
 
+# Vérification du set généré
+from als_validator import validate_als, print_report
+
+# Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
+__version__ = '2.10.0'
+
 def update_all_ids(element, next_id):
     """
     Met à jour tous les attributs Id dans l'élément et ses enfants.
@@ -78,6 +84,28 @@ def update_track_color(track, color_index):
         clip_color = midi_clip.find('.//Color')
         if clip_color is not None:
             clip_color.set('Value', str(color_index))
+
+def finetune_to_root_key_and_detune(relative_note, finetune):
+    """Convertit relative_note + finetune XM en (RootKey, Detune) Ableton
+
+    XM finetune: -128 à +127 en 1/128 de demi-ton (-128 = -1 demi-ton).
+    FT2 n'en garde que 16 pas par demi-ton (finetune >> 3), soit 6.25 cents par pas.
+    Ableton Detune: -50 à +50 cents, donc le demi-ton entier est reporté sur RootKey.
+
+    Exemple: relative_note=17, finetune=-117 → -93.75 cents
+             → RootKey = 60 - 17 + 1 = 44, Detune = +6.25
+    """
+    cents = (finetune >> 3) * 6.25
+    semitones = round(cents / 100)
+    detune = cents - semitones * 100
+    # Dans XM: relative_note = -1 signifie 1 demi-ton plus bas
+    # Dans Ableton: RootKey = 60 (C3) par défaut → RootKey = 60 - relative_note
+    root_key = 60 - relative_note - semitones
+    # Ableton n'accepte que 0-127 ; au-delà (relative_note extrême), FT2 ne joue de toute façon
+    # plus ces notes (hauteur au-delà de B-9)
+    root_key = max(0, min(127, root_key))
+    return root_key, detune
+
 
 def update_sampler_sample(track, sample_info, project_dir, template_sample_part, bpm=125, speed=6, enable_envelope=False):
     """Change le sample chargé dans le Sampler/MultiSampler en copiant la structure du template
@@ -173,31 +201,20 @@ def update_sampler_sample(track, sample_info, project_dir, template_sample_part,
         sample_name = os.path.splitext(os.path.basename(sample_path))[0]
         name_elem.set('Value', sample_name)
 
-    # Mettre à jour RootKey en fonction du relative_note du XM
-    # Dans XM: relative_note = -1 signifie 1 demi-ton plus bas
-    # Dans Ableton: RootKey = 60 (C3) par défaut
-    # Donc: RootKey = 60 - relative_note
+    # Mettre à jour RootKey et Detune (relative_note + finetune du XM)
+    finetune = sample_info.get('finetune', 0)
+    root_key, detune_value = finetune_to_root_key_and_detune(relative_note, finetune)
     root_key_elem = new_sample_part.find('.//RootKey')
     if root_key_elem is not None:
-        root_key = 60 - relative_note
         root_key_elem.set('Value', str(root_key))
-        if relative_note != 0:
+        if root_key != 60:
             print(f"    → RootKey ajustée: {root_key} (relative_note={relative_note:+d})")
 
-    # Mettre à jour Detune (finetune) juste après RootKey
-    # XM finetune: -128 à +127 (centièmes de demi-ton)
-    # Ableton Detune: -50 à +50 cents
-    finetune = sample_info.get('finetune', 0)
-    if finetune != 0:
-        detune_elem = new_sample_part.find('.//Detune')
-        if detune_elem is not None:
-            # Conversion: XM utilise la plage complète -128/+127, Ableton -50/+50
-            # Donc diviser par ~2.56 (128/50)
-            detune_value = finetune / 2.56
-            # Limiter à la plage Ableton
-            detune_value = max(-50, min(50, detune_value))
-            detune_elem.set('Value', str(detune_value))
-            print(f"    → Detune: {detune_value:.1f} cents (finetune={finetune:+d})")
+    detune_elem = new_sample_part.find('.//Detune')
+    if detune_elem is not None:
+        detune_elem.set('Value', str(detune_value))
+        if finetune != 0:
+            print(f"    → Detune: {detune_value:+.2f} cents (finetune={finetune:+d})")
 
     # Mettre à jour Volume (volume par défaut du sample)
     # XM volume: 0-64 (64 = 100%)
@@ -317,44 +334,24 @@ def update_sampler_sample(track, sample_info, project_dir, template_sample_part,
     return True
 
 
-def detect_effect_9xx_per_instrument(patterns, pattern_order, file_format='xm'):
+def detect_effect_9xx_per_instrument(tracks_data):
     """Détecte quels instruments utilisent l'effet 9xx (Sample Offset)
 
+    Travaille sur les notes organisées (XM et MOD), où l'instrument des notes
+    saisies sans numéro d'instrument est déjà résolu.
+
     Args:
-        patterns: Liste des patterns du module
-        pattern_order: Ordre de lecture des patterns
-        file_format: 'xm' ou 'mod' (pour savoir quel champ utiliser)
+        tracks_data: {canal: {instrument: [notes]}} (sortie de organize_tracks_by_channel)
 
     Returns:
         set: Ensemble des numéros d'instruments qui utilisent l'effet 9xx
     """
-    instruments_with_9xx = set()
-
-    # Parcourir les patterns dans l'ordre de lecture
-    for pattern_idx in pattern_order:
-        if pattern_idx >= len(patterns):
-            continue
-
-        pattern = patterns[pattern_idx]
-
-        # Parcourir les events du pattern
-        for note_event in pattern.get('data', []):
-            instrument = note_event.get('instrument')
-
-            if instrument is None:
-                continue
-
-            # Vérifier selon le format
-            if file_format == 'xm':
-                # XM : effet_type = 0x09
-                if note_event.get('effect_type') == 0x09:
-                    instruments_with_9xx.add(instrument)
-            else:  # MOD
-                # MOD : effect = 0x09
-                if note_event.get('effect') == 0x09:
-                    instruments_with_9xx.add(instrument)
-
-    return instruments_with_9xx
+    return {
+        instrument
+        for channel_data in tracks_data.values()
+        for instrument, notes in channel_data.items()
+        if any(note.get('sample_offset_xm') is not None for note in notes)
+    }
 
 
 def regenerate_ids(element, id_mapping, next_id):
@@ -550,23 +547,20 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
         sample_name = os.path.splitext(os.path.basename(sample_path))[0]
         name_elem.set('Value', sample_name)
 
-    # Mettre à jour RootKey
+    # Mettre à jour RootKey et Detune (relative_note + finetune)
+    finetune = sample_info.get('finetune', 0)
+    root_key, detune_value = finetune_to_root_key_and_detune(relative_note, finetune)
     root_key_elem = sample_part.find('.//RootKey')
     if root_key_elem is not None:
-        root_key = 60 - relative_note
         root_key_elem.set('Value', str(root_key))
-        if relative_note != 0:
+        if root_key != 60:
             print(f"    → RootKey ajustée: {root_key} (relative_note={relative_note:+d})")
 
-    # Mettre à jour Detune (finetune)
-    finetune = sample_info.get('finetune', 0)
-    if finetune != 0:
-        detune_elem = sample_part.find('.//Detune')
-        if detune_elem is not None:
-            detune_value = finetune / 2.56
-            detune_value = max(-50, min(50, detune_value))
-            detune_elem.set('Value', str(detune_value))
-            print(f"    → Detune: {detune_value:.1f} cents (finetune={finetune:+d})")
+    detune_elem = sample_part.find('.//Detune')
+    if detune_elem is not None:
+        detune_elem.set('Value', str(detune_value))
+        if finetune != 0:
+            print(f"    → Detune: {detune_value:+.2f} cents (finetune={finetune:+d})")
 
     # Mettre à jour Panorama (panning par défaut du sample)
     xm_panning = sample_info.get('panning', 128)
@@ -1850,22 +1844,6 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
     print(f"Patterns: {len(patterns)}")
     print(f"{'='*60}")
 
-    # Détecter les instruments qui utilisent l'effet 9xx (Sample Offset)
-    instruments_with_9xx = set()
-    if enable_sample_offset:
-        file_format = 'mod' if is_mod else 'xm'
-        instruments_with_9xx = detect_effect_9xx_per_instrument(
-            patterns,
-            xm_info['pattern_order'],
-            file_format
-        )
-        if instruments_with_9xx:
-            inst_hex_list = [f"{i:02X}" for i in sorted(instruments_with_9xx)]
-            print(f"\n🎚️  Effet 9xx détecté sur {len(instruments_with_9xx)} instrument(s): {', '.join(inst_hex_list)}")
-            print(f"   → Ces instruments utiliseront Simpler (Sample Start automatable)")
-        else:
-            print(f"\n🎚️  Aucun effet 9xx détecté")
-
     # Organiser les pistes par canal
     tracks_data = organize_func(
         patterns,
@@ -1873,6 +1851,17 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         samples,
         xm_info['channels']
     )
+
+    # Détecter les instruments qui utilisent l'effet 9xx (Sample Offset)
+    instruments_with_9xx = set()
+    if enable_sample_offset:
+        instruments_with_9xx = detect_effect_9xx_per_instrument(tracks_data)
+        if instruments_with_9xx:
+            inst_hex_list = [f"{i:02X}" for i in sorted(instruments_with_9xx)]
+            print(f"\n🎚️  Effet 9xx détecté sur {len(instruments_with_9xx)} instrument(s): {', '.join(inst_hex_list)}")
+            print(f"   → Ces instruments utiliseront Simpler (Sample Start automatable)")
+        else:
+            print(f"\n🎚️  Aucun effet 9xx détecté")
 
     # Créer un mapping instrument -> sample
     instrument_to_sample = {s['instrument']: s for s in samples}
@@ -2388,6 +2377,10 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
     if enable_sample_offset and automation_data_list:
         add_sample_offset_automations_to_file(als_path, automation_data_list, global_next_id)
 
+    # Vérifier la cohérence du set final (IDs, automations, samples, boucles, accordage)
+    print(f"\n🔍 Vérification du set...")
+    print_report(als_path, validate_als(als_path))
+
     print(f"\n{'='*60}")
     print(f"✓ CONVERSION TERMINÉE")
     print(f"{'='*60}")
@@ -2408,10 +2401,11 @@ def main():
     if len(sys.argv) == 1:
         sys.argv.append('--help')
 
+    title = f"XM2LIVE v{__version__} - Tracker → Ableton Live Converter".center(60)
     parser = argparse.ArgumentParser(
-        description='''
+        description=f'''
 ╔════════════════════════════════════════════════════════════╗
-║     XM2LIVE v2.9.0 - Tracker → Ableton Live Converter     ║
+║{title}║
 ╚════════════════════════════════════════════════════════════╝
 
 Convertit les fichiers tracker (FastTracker 2 XM, Amiga MOD) en
@@ -2495,6 +2489,7 @@ Documentation complète: README.md
     parser.add_argument('--merge-tracks', action='store_true',
                         help='Mode fusion: créer une piste "All notes" par instrument au lieu des pistes individuelles par canal. '
                              'Détecte automatiquement les chevauchements temporels et crée des pistes auxiliaires si nécessaire.')
+    parser.add_argument('--version', action='version', version=f'xm2live {__version__}')
     parser.add_argument('--output', metavar='DIR',
                         help='Répertoire de sortie du projet Ableton (optionnel). '
                              'Si non spécifié, le projet est créé à côté du fichier source dans '
