@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.10.0** (support XM + MOD + Volume + Panning + Sample Offset + Volume 00 + Enveloppes expérimentales ; voir CHANGELOG.md et AUDIT.md)
+**Version actuelle : 2.11.0** (support XM + MOD + Volume + Panning + Sample Offset + Volume 00 + Enveloppes expérimentales ; voir CHANGELOG.md et AUDIT.md)
 
 ## 🎵 Fonctionnalités
 

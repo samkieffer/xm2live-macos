@@ -10,7 +10,8 @@ import struct
 import wave
 import numpy as np
 from pathlib import Path
-from collections import defaultdict
+
+from replayer import Cell, KEY_OFF
 
 
 def decode_name(raw):
@@ -58,14 +59,20 @@ def read_xm_header(filepath):
 
 
 def parse_pattern_data(data, num_rows, num_channels):
-    """Parse les données d'un pattern XM"""
-    notes = []
+    """Parse les données d'un pattern XM en grille de cases (Cell, ou None si la case est vide)
+
+    L'interprétation musicale (instrument du canal, délais, sauts, tempo) est faite par replayer.py.
+    """
+    rows = []
     pos = 0
 
     for row in range(num_rows):
+        row_cells = []
+        rows.append(row_cells)
         for channel in range(num_channels):
             if pos >= len(data):
-                break
+                row_cells.append(None)
+                continue
 
             # Lire le premier byte
             note_byte = data[pos]
@@ -122,49 +129,20 @@ def parse_pattern_data(data, num_rows, num_channels):
             if effect_type == 0x0C:
                 decoded_volume = min(effect_param or 0, 64)
 
-            # Si on a une note valide (sans instrument, le canal rejoue son dernier instrument)
-            if note and note > 0 and note < 97:
-                # Extraire le sample offset si effet 9xx est présent
-                sample_offset_xm = None
-                if effect_type == 0x09:  # Effet 9xx = Sample Offset
-                    sample_offset_xm = effect_param if effect_param is not None else 0
+            # Convertir la note XM (1-96) en MIDI : note 1 = C-0, note 49 = C-4 → MIDI 60 ; 97 = key-off
+            midi_note = None
+            if note == 97:
+                midi_note = KEY_OFF
+            elif note and 0 < note < 97:
+                midi_note = note - 1 + 12
 
-                notes.append({
-                    'row': row,
-                    'channel': channel,
-                    'note': note,
-                    'instrument': instrument or None,  # None = instrument du canal
-                    'volume': decoded_volume,  # None = pas de volume explicite
-                    'effect_type': effect_type,
-                    'effect_param': effect_param,
-                    'sample_offset_xm': sample_offset_xm
-                })
+            effect, param = effect_type or 0, effect_param or 0
+            if midi_note is None and not instrument and decoded_volume is None and not effect and not param:
+                row_cells.append(None)
+            else:
+                row_cells.append(Cell(midi_note, instrument or None, decoded_volume, effect, param))
 
-            # Capturer volume 00 même sans note (événement "note stop")
-            elif decoded_volume is not None and decoded_volume == 0:
-                notes.append({
-                    'row': row,
-                    'channel': channel,
-                    'note': None,
-                    'instrument': None,
-                    'volume': 0,
-                    'effect_type': None,
-                    'effect_param': None,
-                    'sample_offset_xm': None,
-                    'is_volume_stop': True
-                })
-
-            # Instrument sans note : devient l'instrument du canal pour les notes suivantes
-            elif instrument:
-                notes.append({
-                    'row': row,
-                    'channel': channel,
-                    'note': None,
-                    'instrument': instrument,
-                    'is_instrument_only': True
-                })
-
-    return notes
+    return rows
 
 
 def read_patterns(f, num_patterns, num_channels):
@@ -183,23 +161,24 @@ def read_patterns(f, num_patterns, num_channels):
             if remaining_header > 0:
                 f.read(remaining_header)
 
-            # Lire les données du pattern
-            pattern_data = []
+            # Lire les données du pattern (packed_size 0 = pattern vide)
+            cells = []
             if packed_size > 0:
                 data = f.read(packed_size)
-                pattern_data = parse_pattern_data(data, num_rows, num_channels)
+                cells = parse_pattern_data(data, num_rows, num_channels)
 
             patterns.append({
                 'number': i,
                 'rows': num_rows,
-                'data': pattern_data
+                'cells': cells
             })
 
-            print(f"  Pattern {i+1}/{num_patterns}: {num_rows} rows, {len(pattern_data)} notes")
+            num_notes = sum(1 for row in cells for cell in row if cell and cell.note is not None)
+            print(f"  Pattern {i+1}/{num_patterns}: {num_rows} rows, {num_notes} notes")
 
         except Exception as e:
             print(f"  Erreur pattern {i+1}: {e}")
-            patterns.append({'number': i, 'rows': 64, 'data': []})
+            patterns.append({'number': i, 'rows': 64, 'cells': []})
 
     return patterns
 
@@ -370,147 +349,3 @@ def extract_samples_and_patterns(xm_path, samples_dir):
 
     return samples, patterns, xm_info
 
-
-def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
-    """Organise les notes par canal et par instrument"""
-    # Structure: channel -> instrument -> notes
-    tracks = defaultdict(lambda: defaultdict(list))
-
-    # D'abord, collecter toutes les notes par canal (pour calculer les durées)
-    notes_by_channel = defaultdict(list)
-
-    # État de chaque canal, suivi dans l'ordre de lecture : une note sans instrument
-    # rejoue le dernier instrument du canal et garde son volume courant
-    channel_instrument = {}
-    channel_volume = {}
-
-    # Parcourir les patterns dans l'ordre de la song
-    current_time = 0.0
-
-    for pattern_idx in pattern_order:
-        if pattern_idx >= len(patterns):
-            continue
-
-        pattern = patterns[pattern_idx]
-
-        for note_event in pattern['data']:
-            channel = note_event['channel']
-            row = note_event['row']
-
-            # Calculer le temps en beats (4 rows = 1 beat en général)
-            time_in_pattern = row / 4.0
-            absolute_time = current_time + time_in_pattern
-
-            # Instrument seul : remet aussi le volume par défaut du sample
-            if note_event.get('is_instrument_only'):
-                channel_instrument[channel] = note_event['instrument']
-                channel_volume[channel] = 64
-                continue
-
-            # Si c'est un événement volume stop (volume 00)
-            if note_event.get('is_volume_stop'):
-                notes_by_channel[channel].append({
-                    'time': absolute_time,
-                    'is_volume_stop': True
-                })
-                channel_volume[channel] = 0
-                continue  # Passer au suivant
-
-            # Code pour les vraies notes
-            instrument = note_event['instrument'] or channel_instrument.get(channel)
-            if instrument is None:
-                continue  # Aucun instrument encore choisi sur ce canal : FT2 ne joue rien
-            channel_instrument[channel] = instrument
-
-            # Volume explicite (colonne volume ou Cxx), sinon défaut du sample si l'instrument
-            # est indiqué, sinon volume courant du canal
-            volume = note_event['volume']
-            if volume is None:
-                volume = 64 if note_event['instrument'] else channel_volume.get(channel, 64)
-            channel_volume[channel] = volume
-
-            # Note jouée à volume 0 : inaudible dans FT2 (tant que les glissements de volume
-            # ne sont pas convertis), Live remonterait une vélocité 0 à 1 → simple arrêt
-            if volume == 0:
-                notes_by_channel[channel].append({
-                    'time': absolute_time,
-                    'is_volume_stop': True
-                })
-                continue
-
-            # Convertir la note XM (1-96) en MIDI (0-127)
-            # Note 1 = C-0, Note 49 = C-4 (middle C = MIDI 60)
-            midi_note = note_event['note'] - 1 + 12  # Ajustement
-
-            # Velocity depuis volume (0-64 -> 0-127)
-            velocity = min(127, volume * 2)
-
-            # Extraire le panning si effet 8xx est présent
-            panning_xm = None
-            if note_event.get('effect_type') == 0x08:  # Effet 8xx = Set Panning
-                param = note_event.get('effect_param')
-                panning_xm = param if param is not None else 128  # 0-255, 128=centre par défaut
-
-            # Extraire le sample offset si effet 9xx est présent
-            sample_offset_xm = note_event.get('sample_offset_xm')  # Déjà extrait par le parser
-
-            # Stocker temporairement (durée sera calculée après)
-            notes_by_channel[channel].append({
-                'time': absolute_time,
-                'note': midi_note,
-                'velocity': velocity,
-                'instrument': instrument,
-                'duration': 0,  # Sera calculé
-                'panning_xm': panning_xm,  # Panning de l'effet 8xx (0-255) ou None
-                'sample_offset_xm': sample_offset_xm  # Sample offset de l'effet 9xx (0-255) ou None
-            })
-
-        # Avancer le temps (nombre de rows dans le pattern / 4)
-        current_time += pattern['rows'] / 4.0
-
-    # Calculer les durées intelligemment : intervalle jusqu'à la prochaine note
-    # Dans FastTracker, une piste = une voix, donc une nouvelle note interrompt la précédente
-    for channel, channel_notes in notes_by_channel.items():
-        # Trier par temps
-        channel_notes.sort(key=lambda n: n['time'])
-
-        for i, note in enumerate(channel_notes):
-            # Ignorer les événements volume stop (utilisés juste pour calcul)
-            if note.get('is_volume_stop'):
-                continue
-
-            # Chercher le prochain événement (note OU volume stop)
-            next_event_time = None
-            for j in range(i + 1, len(channel_notes)):
-                next_event = channel_notes[j]
-
-                # Volume stop coupe la note immédiatement
-                if next_event.get('is_volume_stop'):
-                    next_event_time = next_event['time']
-                    break
-
-                # Nouvelle note coupe aussi
-                if not next_event.get('is_volume_stop'):
-                    next_event_time = next_event['time']
-                    break
-
-            # Calculer la durée
-            if next_event_time is not None:
-                interval = next_event_time - note['time']
-                # Limiter à 4 beats max pour la lisibilité
-                note['duration'] = min(interval, 4.0)
-            else:
-                # Dernière note : durée par défaut de 4 beats
-                note['duration'] = 4.0
-
-            # Ajouter à la structure finale
-            tracks[channel][note['instrument']].append({
-                'time': note['time'],
-                'note': note['note'],
-                'velocity': note['velocity'],
-                'duration': note['duration'],
-                'panning_xm': channel_notes[i].get('panning_xm'),  # Panning de l'effet 8xx (0-255) ou None
-                'sample_offset_xm': note.get('sample_offset_xm')  # Sample offset de l'effet 9xx (0-255) ou None
-            })
-
-    return tracks

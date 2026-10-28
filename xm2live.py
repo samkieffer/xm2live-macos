@@ -20,20 +20,12 @@ from pathlib import Path
 from collections import defaultdict
 from buildable.live_set import LiveSet
 
-# Importer les fonctions de lecture XM
-from xm_parser import (
-    read_xm_header,
-    read_patterns,
-    parse_pattern_data,
-    extract_samples_and_patterns as extract_xm,
-    organize_tracks_by_channel as organize_xm
-)
+# Importer les fonctions de lecture XM et MOD
+from xm_parser import extract_samples_and_patterns as extract_xm
+from mod_parser import extract_samples_and_patterns as extract_mod
 
-# Importer les fonctions de lecture MOD
-from mod_parser import (
-    extract_samples_and_patterns as extract_mod,
-    organize_tracks_by_channel as organize_mod
-)
+# Moteur de lecture commun (ordre de lecture, ticks, tempo)
+from replayer import play_song
 
 # Importer le template minimal embarqué
 from minimal_template import get_minimal_template_root
@@ -42,7 +34,7 @@ from minimal_template import get_minimal_template_root
 from als_validator import validate_als, print_report
 
 # Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
-__version__ = '2.10.0'
+__version__ = '2.11.0'
 
 def update_all_ids(element, next_id):
     """
@@ -1227,6 +1219,74 @@ def create_pan_automation(track, notes, sample_default_pan, next_id):
     return next_id
 
 
+LIVE_TEMPO_MIN, LIVE_TEMPO_MAX = 20.0, 999.0
+
+
+def write_tempo(live_set_element, tempo_changes):
+    """Écrit le tempo du set : valeur initiale et automation en escalier
+
+    Live code un saut de valeur par deux points au même instant (ancienne puis nouvelle
+    valeur), comme dans les sets qu'il enregistre lui-même.
+
+    Args:
+        live_set_element: élément LiveSet
+        tempo_changes: [(temps en beats, BPM Live)], le premier au temps 0 (replayer.play_song)
+
+    Returns:
+        Nombre de changements écrits en automation
+    """
+    tempos = []
+    for time, tempo in tempo_changes:
+        clamped = max(LIVE_TEMPO_MIN, min(LIVE_TEMPO_MAX, tempo))
+        if clamped != tempo:
+            print(f"   ⚠️  Tempo {tempo:.2f} hors de la plage de Live, ramené à {clamped:.0f} (temps {time})")
+        tempos.append((time, clamped))
+
+    main_track = live_set_element.find('MainTrack')
+    if main_track is None:
+        main_track = live_set_element.find('MasterTrack')  # nom avant Live 12
+    tempo_param = main_track.find('DeviceChain/Mixer/Tempo')
+    tempo_param.find('Manual').set('Value', str(tempos[0][1]))
+    target_id = tempo_param.find('AutomationTarget').get('Id')
+
+    # Enveloppe de tempo existante dans le template (un seul point initial)
+    envelope = None
+    for candidate in main_track.iter('AutomationEnvelope'):
+        if candidate.find('EnvelopeTarget/PointeeId').get('Value') == target_id:
+            envelope = candidate
+            break
+    if envelope is None:
+        envelopes = main_track.find('AutomationEnvelopes/Envelopes')
+        envelope = ET.SubElement(envelopes, 'AutomationEnvelope')
+        envelope.set('Id', str(len(envelopes) - 1))
+        ET.SubElement(ET.SubElement(envelope, 'EnvelopeTarget'), 'PointeeId').set('Value', target_id)
+        automation = ET.SubElement(envelope, 'Automation')
+        ET.SubElement(automation, 'Events')
+        transform_state = ET.SubElement(automation, 'AutomationTransformViewState')
+        ET.SubElement(transform_state, 'IsTransformPending').set('Value', 'false')
+        ET.SubElement(transform_state, 'TimeAndValueTransforms')
+
+    events = envelope.find('Automation/Events')
+    for event in list(events):
+        events.remove(event)
+
+    def add_event(time, value):
+        event = ET.SubElement(events, 'FloatEvent')
+        event.set('Id', str(len(events) - 1))
+        event.set('Time', str(time))
+        event.set('Value', str(value))
+
+    add_event(-63072000, tempos[0][1])  # valeur avant le début du morceau (convention Live)
+    for (_, previous), (time, tempo) in zip(tempos, tempos[1:]):
+        add_event(time, previous)
+        add_event(time, tempo)
+
+    print(f"   ✓ Tempo initial: {tempos[0][1]:.2f} BPM")
+    if len(tempos) > 1:
+        print(f"   ✓ {len(tempos) - 1} changement(s) de tempo en automation")
+    return len(tempos) - 1
+
+
 def configure_envelope_adsr(sampler, envelope_info, bpm, speed):
     """Configure l'enveloppe ADSR du Sampler basée sur l'enveloppe volume FT2
 
@@ -1797,10 +1857,8 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
     print(f"\n📀 Extraction du fichier {format_name}...")
     if is_mod:
         samples, patterns, xm_info = extract_mod(xm_path, samples_dir)
-        organize_func = organize_mod
     else:
         samples, patterns, xm_info = extract_xm(xm_path, samples_dir)
-        organize_func = organize_xm
 
     if not samples:
         print("\n❌ Aucun sample extrait !")
@@ -1833,24 +1891,23 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
                     }
             print(f"    → {len(envelopes)} enveloppes chargées")
 
+    # Jouer le morceau comme le tracker : ordre de lecture réel, ticks, changements de tempo
+    song = play_song(patterns, xm_info['pattern_order'], xm_info['tempo'], xm_info['bpm'],
+                     'mod' if is_mod else 'xm')
+    tracks_data = song['tracks']
+    tempo_changes = song['tempo_changes']
+    minutes, secs = divmod(song['duration_seconds'], 60)
+
     print(f"\n{'='*60}")
     print(f"MODULE: {xm_info['name']}")
-    print(f"Speed: {xm_info['tempo']} ticks/row")
-    print(f"BPM: {xm_info['bpm']}")
-    real_bpm = xm_info['bpm'] * (6.0 / xm_info['tempo'])
-    print(f"BPM réel: {real_bpm:.2f}")
+    print(f"Speed / BPM initiaux: {xm_info['tempo']} ticks/row, {xm_info['bpm']} BPM")
+    print(f"Tempo Live initial: {tempo_changes[0][1]:.2f} BPM "
+          f"({len(tempo_changes) - 1} changement(s) en cours de morceau)")
+    print(f"Durée: {int(minutes)}:{secs:04.1f} ({song['end_time'] / 4:.0f} mesures)")
     print(f"Canaux: {xm_info['channels']}")
     print(f"Samples: {len(samples)}")
     print(f"Patterns: {len(patterns)}")
     print(f"{'='*60}")
-
-    # Organiser les pistes par canal
-    tracks_data = organize_func(
-        patterns,
-        xm_info['pattern_order'],
-        samples,
-        xm_info['channels']
-    )
 
     # Détecter les instruments qui utilisent l'effet 9xx (Sample Offset)
     instruments_with_9xx = set()
@@ -2286,42 +2343,10 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
 
     print(f"   {folded_count} pistes repliées")
 
-    # Calculer le BPM réel selon la formule FastTracker 2
-    # BPM réel = BPM × (6 / Speed)
-    xm_speed = xm_info['tempo']  # Dans XM, "tempo" = speed (ticks par row)
-    xm_bpm = xm_info['bpm']      # BPM XM (calibré pour speed=6)
-    real_bpm = xm_bpm * (6.0 / xm_speed)
-
-    # Mettre à jour le tempo partout où il apparaît
-    print(f"\n🎵 Calcul du tempo réel:")
-    print(f"   XM Speed: {xm_speed} ticks/row")
-    print(f"   XM BPM: {xm_bpm}")
-    print(f"   → BPM réel: {real_bpm:.2f} (formule: {xm_bpm} × 6/{xm_speed})")
-    tempo_updated_count = 0
-    floatevent_updated_count = 0
-
-    # Le BPM n'est PAS dans <Tempo> mais directement dans <Manual> et <FloatEvent>
-    # Chercher tous les éléments Manual avec Value="120" (le défaut du template)
-    print(f"   Recherche des éléments <Manual> avec Value='120'...")
-    for manual in live_set.element.iter('Manual'):
-        if manual.get('Value') == '120':
-            manual.set('Value', str(real_bpm))
-            tempo_updated_count += 1
-            print(f"   → Manual: 120 → {real_bpm:.2f} BPM")
-
-    # Aussi mettre à jour les FloatEvent si présents
-    print(f"   Recherche des éléments <FloatEvent> avec Value='120'...")
-    for floatevent in live_set.element.iter('FloatEvent'):
-        if floatevent.get('Value') == '120':
-            floatevent.set('Value', str(real_bpm))
-            floatevent_updated_count += 1
-            print(f"   → FloatEvent: 120 → {real_bpm:.2f} BPM")
-
-    total_updated = tempo_updated_count + floatevent_updated_count
-    if total_updated > 0:
-        print(f"   ✓ Tempo mis à jour ({tempo_updated_count} Manual, {floatevent_updated_count} FloatEvent)")
-    else:
-        print(f"   ⚠️  Aucun élément trouvé avec Value='120' - BPM peut-être déjà différent de 120?")
+    # Tempo : BPM Live = BPM × 6 / Speed (formule FT2), plus une automation en escalier
+    # pour chaque changement Fxx en cours de morceau
+    print(f"\n🎵 Tempo:")
+    write_tempo(live_set.element, tempo_changes)
 
     # Réinitialiser la position de la tête de lecture au début (1.1.1)
     print(f"\n⏮️  Réinitialisation de la tête de lecture...")

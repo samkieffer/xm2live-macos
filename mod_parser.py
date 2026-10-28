@@ -10,9 +10,9 @@ import struct
 import wave
 import numpy as np
 from pathlib import Path
-from collections import defaultdict
 
 from xm_parser import decode_name
+from replayer import Cell
 
 
 # Table de conversion Period → Note MIDI
@@ -131,13 +131,16 @@ def read_mod_patterns(f, num_patterns, num_channels):
     patterns = []
 
     for pattern_num in range(num_patterns):
-        pattern_data = []
+        cells = []
 
         for row in range(64):  # Toujours 64 rows dans MOD
+            row_cells = []
+            cells.append(row_cells)
             for channel in range(num_channels):
                 # Lire 4 bytes pour cette note
                 data = f.read(4)
                 if len(data) < 4:
+                    row_cells.append(None)
                     continue
 
                 # Décoder les 4 bytes
@@ -157,68 +160,19 @@ def read_mod_patterns(f, num_patterns, num_channels):
                 effect = data[2] & 0x0F
                 effect_param = data[3]
 
-                # Extraire le sample offset si effet 9xx est présent
-                sample_offset_xm = None
-                if effect == 0x09:  # Effet 9xx = Sample Offset
-                    sample_offset_xm = effect_param if effect_param is not None else 0
-
-                # Ajouter les notes (sans numéro de sample, le canal rejoue son dernier sample)
-                if period > 0:
-                    midi_note = period_to_midi(period)
-                    if midi_note:
-                        pattern_data.append({
-                            'row': row,
-                            'channel': channel,
-                            'note': midi_note,
-                            'period': period,
-                            'sample': sample,  # 0 = sample du canal
-                            'effect': effect,
-                            'effect_param': effect_param,
-                            # Effet Cxx = volume de la note ; None = pas de volume explicite
-                            'volume': min(effect_param, 64) if effect == 0xC else None,
-                            'sample_offset_xm': sample_offset_xm
-                        })
-                # Aussi capturer les effets F (Set Speed/Tempo) même sans note
-                elif effect == 0xF and effect_param > 0:
-                    pattern_data.append({
-                        'row': row,
-                        'channel': channel,
-                        'note': None,  # Pas de note
-                        'period': 0,
-                        'sample': 0,
-                        'effect': effect,
-                        'effect_param': effect_param,
-                        'volume': 64,
-                        'sample_offset_xm': sample_offset_xm
-                    })
-                # Capturer effet C00 (Set Volume 00 = stop note)
-                elif effect == 0xC and effect_param == 0x00:
-                    pattern_data.append({
-                        'row': row,
-                        'channel': channel,
-                        'note': None,
-                        'period': 0,
-                        'sample': 0,
-                        'effect': effect,
-                        'effect_param': effect_param,
-                        'volume': 0,
-                        'sample_offset_xm': None,
-                        'is_volume_stop': True
-                    })
-                # Sample sans note : devient le sample du canal pour les notes suivantes
-                elif sample > 0:
-                    pattern_data.append({
-                        'row': row,
-                        'channel': channel,
-                        'note': None,
-                        'sample': sample,
-                        'is_instrument_only': True
-                    })
+                # Case normalisée (même format que XM) ; sans numéro de sample, le canal
+                # rejoue son dernier sample. Effet Cxx = volume de la ligne
+                midi_note = period_to_midi(period) if period > 0 else None
+                volume = min(effect_param, 64) if effect == 0xC else None
+                if midi_note is None and not sample and volume is None and not effect and not effect_param:
+                    row_cells.append(None)
+                else:
+                    row_cells.append(Cell(midi_note, sample or None, volume, effect, effect_param))
 
         patterns.append({
             'number': pattern_num,
             'rows': 64,
-            'data': pattern_data
+            'cells': cells
         })
 
     return patterns
@@ -296,7 +250,8 @@ def extract_samples_and_patterns(mod_path, samples_dir):
         patterns = read_mod_patterns(f, num_patterns, num_channels)
 
         for i, pattern in enumerate(patterns):
-            print(f"  Pattern {i+1}/{num_patterns}: 64 rows, {len(pattern['data'])} notes")
+            num_notes = sum(1 for row in pattern['cells'] for cell in row if cell and cell.note is not None)
+            print(f"  Pattern {i+1}/{num_patterns}: 64 rows, {num_notes} notes")
 
         # Lire les données des samples
         print("\nLecture des samples...")
@@ -353,28 +308,10 @@ def extract_samples_and_patterns(mod_path, samples_dir):
                         'length': sample_info['length']  # Longueur en samples (pour effet 9xx)
                     })
 
-        # Extraire Speed et BPM depuis les effets F dans les patterns
-        # MOD utilise Speed=6, BPM=125 par défaut (modifiable via effet F)
+        # Speed et BPM par défaut de ProTracker : les effets Fxx sont appliqués par
+        # replayer.py là où ils apparaissent (y compris en cours de morceau)
         default_speed = 6
         default_bpm = 125
-
-        # Chercher dans les patterns dans l'ordre de lecture (pattern_order)
-        for pattern_idx in pattern_order[:10]:  # Chercher dans les 10 premiers patterns joués
-            if pattern_idx < len(patterns):
-                pattern = patterns[pattern_idx]
-                for note_data in pattern['data']:
-                    if note_data.get('effect') == 0xF:  # Effet F
-                        param = note_data.get('effect_param', 0)
-                        if param > 0:
-                            if param <= 0x1F:  # 0x01-0x1F = Set Speed
-                                default_speed = param
-                                print(f"   → Speed trouvé dans pattern {pattern_idx}: {param}")
-                            else:  # 0x20-0xFF = Set Tempo (BPM)
-                                default_bpm = param
-                                print(f"   → BPM trouvé dans pattern {pattern_idx}: {param}")
-                            break  # Prendre le premier effet F trouvé
-                if default_speed != 6 or default_bpm != 125:
-                    break  # Arrêter si on a trouvé des valeurs
 
         mod_info = {
             'name': title,
@@ -386,140 +323,6 @@ def extract_samples_and_patterns(mod_path, samples_dir):
         }
 
     return samples, patterns, mod_info
-
-
-def organize_tracks_by_channel(patterns, pattern_order, samples, num_channels):
-    """Organise les notes par canal et par instrument
-
-    Compatible avec la fonction de xm_parser.py
-    Calcule les durées basées sur les intervalles entre notes
-    """
-    tracks = defaultdict(lambda: defaultdict(list))
-
-    # D'abord collecter toutes les notes par canal
-    notes_by_channel = defaultdict(list)
-    current_time = 0.0
-
-    # État de chaque canal, suivi dans l'ordre de lecture : une note sans numéro de sample
-    # rejoue le dernier sample du canal et garde son volume courant
-    channel_sample = {}
-    channel_volume = {}
-
-    for pattern_idx in pattern_order:
-        if pattern_idx >= len(patterns):
-            continue
-
-        pattern = patterns[pattern_idx]
-
-        for note_event in pattern['data']:
-            row = note_event['row']
-            channel = note_event['channel']
-
-            # Calculer le temps absolu (en beats)
-            absolute_time = current_time + (row / 4.0)
-
-            # Sample seul : remet aussi le volume par défaut du sample
-            if note_event.get('is_instrument_only'):
-                channel_sample[channel] = note_event['sample']
-                channel_volume[channel] = 64
-                continue
-
-            # Si c'est un événement volume stop (effet C00)
-            if note_event.get('is_volume_stop'):
-                notes_by_channel[channel].append({
-                    'time': absolute_time,
-                    'is_volume_stop': True
-                })
-                channel_volume[channel] = 0
-                continue  # Passer au suivant
-
-            # Effet F sans note : ne doit pas couper la note en cours
-            if note_event['note'] is None:
-                continue
-
-            # Code pour les vraies notes
-            sample_num = note_event['sample'] or channel_sample.get(channel)
-            if not sample_num:
-                continue  # Aucun sample encore choisi sur ce canal
-            channel_sample[channel] = sample_num
-            midi_note = note_event['note']
-
-            # Volume explicite (Cxx), sinon défaut du sample si le sample est indiqué,
-            # sinon volume courant du canal
-            volume = note_event['volume']
-            if volume is None:
-                volume = 64 if note_event['sample'] else channel_volume.get(channel, 64)
-            channel_volume[channel] = volume
-
-            # Note jouée à volume 0 (C00) : inaudible dans ProTracker → simple arrêt
-            if volume == 0:
-                notes_by_channel[channel].append({
-                    'time': absolute_time,
-                    'is_volume_stop': True
-                })
-                continue
-
-            velocity = int((volume / 64.0) * 127)
-
-            # Extraire le sample offset si effet 9xx est présent
-            sample_offset_xm = note_event.get('sample_offset_xm')  # Déjà extrait par le parser
-
-            notes_by_channel[channel].append({
-                'time': absolute_time,
-                'note': midi_note,
-                'velocity': velocity,
-                'instrument': sample_num,
-                'duration': 0,  # Sera calculé
-                'sample_offset_xm': sample_offset_xm  # Sample offset de l'effet 9xx (0-255) ou None
-            })
-
-        # Avancer le temps (64 rows = 16 beats à 4 rows/beat)
-        current_time += pattern['rows'] / 4.0
-
-    # Calculer les durées basées sur les intervalles
-    for channel, channel_notes in notes_by_channel.items():
-        # Trier par temps
-        channel_notes.sort(key=lambda n: n['time'])
-
-        for i, note in enumerate(channel_notes):
-            # Ignorer les événements volume stop (utilisés juste pour calcul)
-            if note.get('is_volume_stop'):
-                continue
-
-            # Chercher le prochain événement (note OU volume stop)
-            next_event_time = None
-            for j in range(i + 1, len(channel_notes)):
-                next_event = channel_notes[j]
-
-                # Volume stop coupe la note immédiatement
-                if next_event.get('is_volume_stop'):
-                    next_event_time = next_event['time']
-                    break
-
-                # Nouvelle note coupe aussi
-                if not next_event.get('is_volume_stop'):
-                    next_event_time = next_event['time']
-                    break
-
-            # Calculer la durée
-            if next_event_time is not None:
-                interval = next_event_time - note['time']
-                # Limiter à 4 beats max pour la lisibilité
-                note['duration'] = min(interval, 4.0)
-            else:
-                # Dernière note : durée par défaut de 4 beats
-                note['duration'] = 4.0
-
-            # Ajouter à la structure finale
-            tracks[channel][note['instrument']].append({
-                'time': note['time'],
-                'note': note['note'],
-                'velocity': note['velocity'],
-                'duration': note['duration'],
-                'sample_offset_xm': note.get('sample_offset_xm')  # Sample offset de l'effet 9xx (0-255) ou None
-            })
-
-    return tracks
 
 
 # Fonction principale pour test

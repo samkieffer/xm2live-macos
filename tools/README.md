@@ -27,6 +27,22 @@ python3 tools/check_collection.py --jobs 8
 État au 28/10/2026 : seuls `esfe.xm` (un exécutable Windows renommé) et `MACHINER.MOD` (fichier
 tronqué) échouent, avec un message clair.
 
+## Déroulé et tempo : `check_timing.py`
+
+Compare, ligne par ligne, le parcours du morceau calculé par `replayer.py` à celui de libopenmpt
+(ordre, ligne, speed, BPM de chaque ligne jouée). La référence est tracée en lisant la position de
+libopenmpt pendant un rendu (bibliothèque installée avec `brew install libopenmpt`, appelée par
+`ctypes`). Environ 25 s pour la collection.
+
+```bash
+python3 tools/check_timing.py --jobs 8               # toute la collection
+python3 tools/check_timing.py "/chemin/BDTN.XM"      # un module
+```
+
+État au 28/10/2026 : 393 modules identiques sur 394 (`esfe.xm` n'est pas un module).
+`openmpt123 --info` n'est pas une bonne référence : sa durée inclut les ordres jamais atteints
+(BAM_BAM.XM : 249,6 s annoncées pour 224,0 s réellement jouées).
+
 ## Validation : `../als_validator.py`
 
 Lancé automatiquement à la fin de chaque conversion, et utilisable seul :

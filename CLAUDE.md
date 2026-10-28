@@ -6,7 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.10.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+**Status:** Production-ready (Version 2.11.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+
+**v2.11.0 (2026-10-28):** playback engine `replayer.py` (lot 1 of AUDIT.md): real song flow
+(Bxx/Dxx/E6x/EEx), Fxx speed/BPM changes as tempo automation, EDx/ECx/key-off at tick level.
 
 **v2.10.0 (2026-10-28):** finetune and 16-bit loop fixes, notes without instrument, Cxx volume,
 volume-0 notes as stops, deterministic sample file names, `--envelope` restored, `.als` validator
@@ -86,6 +89,9 @@ python3 tools/snapshot.py save
 # Convert + validate the whole collection (~390 modules, ~1.5 min): catches crashes
 python3 tools/check_collection.py --jobs 8
 
+# Song flow and tempo, row by row, against libopenmpt (~25 s for the collection)
+python3 tools/check_timing.py --jobs 8
+
 # Validate any generated set (also runs automatically at the end of each conversion)
 python3 als_validator.py path/to/project.als
 
@@ -109,11 +115,11 @@ Input File (.xm/.mod)
     ↓
 Parser (xm_parser.py or mod_parser.py)
     ↓
-[samples, patterns, metadata]
+[samples, patterns (grid of Cell), metadata]
     ↓
-organize_tracks_by_channel()
+replayer.play_song()  ← walks the song like the tracker (flow, ticks, tempo)
     ↓
-{channel: {instrument: [notes]}}
+{channel: {instrument: [notes]}} + tempo changes
     ↓
 populate_tracks() in xm2live.py
     ↓
@@ -133,7 +139,6 @@ Output (.als + WAV samples)
 - Big-endian binary parsing
 - Period-to-MIDI conversion with +24 semitone offset
 - 8-bit to 16-bit sample conversion
-- Effect F detection for Speed/BPM
 - Loops: Forward only (no ping-pong on Amiga)
 - Returns: `(samples, patterns, mod_info)`
 
@@ -156,18 +161,11 @@ samples = [{
 patterns = [{
     'number': int,
     'rows': int,
-    'data': [{
-        'row': int,
-        'channel': int,
-        'note': int,  # XM note 1-96 / MIDI note for MOD; None for non-note events
-        'instrument': int,  # None (XM) or 'sample': 0 (MOD) = reuse the channel's last instrument
-        'volume': int,  # 0-64 from vol column or Cxx; None = not set on this row
-        'effect': int,
-        'effect_param': int
-        # Also: 'is_volume_stop' (vol 00 / C00), 'is_instrument_only' (instrument without note).
-        # organize_tracks_by_channel() resolves instrument and volume per channel in play order.
-    }]
+    'cells': [[Cell or None, ...], ...]  # one list per row, one entry per channel (None = empty)
 }]
+# replayer.Cell(note, instrument, volume, effect, param), same for XM and MOD:
+#   note: MIDI note, KEY_OFF (-1) or None; instrument: None = channel's last instrument
+#   volume: 0-64 from the XM volume column or Cxx, None = not set; effect/param: shared 0-F numbering
 
 info = {
     'name': str,
@@ -188,7 +186,8 @@ The project uses the `buildable` library to load/save .als files, but directly m
 - `NumVoices` - Voice count (0=1 voice, 5=6 voices) - indexed from 0
 - `SustainLoop` - Loop settings (LoopOn, Start, End, Mode)
 - `RootKey` - Root note adjustment based on XM relative_note
-- `Manual` and `FloatEvent` - Tempo settings
+- `MainTrack/DeviceChain/Mixer/Tempo` - Tempo (`Manual`) and its automation envelope in
+  `MainTrack/AutomationEnvelopes` (step = two FloatEvents at the same time), see `write_tempo()`
 
 **Template requirement:**
 - 100 MIDI tracks with Sampler
@@ -236,35 +235,22 @@ else:
 current = np.int16(current + data[k])  # ❌ DO NOT USE
 ```
 
-### 4. Effect F Detection (Speed/BPM)
+### 4. Playback Engine (replayer.py, v2.11.0)
 
-Effect F commands can exist **without notes** in a cell. The parser must capture these:
-
-```python
-# Capture effect F even when note is None
-elif effect == 0xF and effect_param > 0:
-    pattern_data.append({
-        'note': None,  # Important: can be None
-        'effect': effect,
-        'effect_param': effect_param
-    })
-```
-
-Search in `pattern_order` (play order), not pattern numbers.
+`play_song()` walks `pattern_order` like the tracker instead of laying patterns end to end:
+- Flow: Bxx jump (a backward jump = end of song), Dxx break (decimal row), E6x pattern loop
+  (per channel), EEx pattern delay, orders pointing to a missing pattern are skipped (like OpenMPT)
+- Fxx: speed (< 32) or BPM (>= 32) from the row where it appears, written as a tempo automation
+- Time: 1 row = 1/4 beat always, 1 tick = 1/(4 × speed) beat, so Live BPM = BPM × 6 / speed
+- Ticks: EDx delays the whole cell (x >= speed: not played), ECx cuts at tick x, key-off stops
+- Channel state: a note without instrument replays the channel's instrument and keeps its volume
+- Verified row by row against libopenmpt with `tools/check_timing.py` (393/394 identical)
 
 ### 5. Note Duration Calculation
 
-```python
-# Interval-based duration (max 4 beats)
-for i, note in enumerate(notes):
-    if i + 1 < len(notes):
-        interval = notes[i+1]['time'] - note['time']
-        note['duration'] = min(interval, 4.0)
-    else:
-        note['duration'] = 4.0
-```
-
-This simulates monophonic tracker behavior where each channel has one voice.
+Each channel is one voice: a note lasts until the next event on its channel (next note, key-off,
+ECx cut, volume 0), capped at 4 beats (lisibility; lot 2 of AUDIT.md replaces the cap with the real
+end of the sound). Notes cut on the tick they start (EC0) are dropped.
 
 ### 6. NumVoices Configuration
 
@@ -335,8 +321,9 @@ Note without 8xx → Pan returns to center (default)
   - Available with `--envelope` flag (disabled by default)
 - **Panning:** Sample default panning IS supported. Effect 8xx automations available with flag
 - **S3M/IT formats:** NOT supported - only XM and MOD
-- **Song flow and timing (lot 1 of AUDIT.md):** Dxx/Bxx/E6x/EEx, mid-song Fxx, EDx and ECx are
-  NOT handled yet - only the initial tempo is used and patterns are laid end to end
+- **Tone portamento (3xx, 5xx, vol column Fx):** the note is retriggered instead of gliding (lot 4)
+- **Missing patterns:** an order pointing to a pattern absent from the file is skipped (OpenMPT
+  behaviour); FT2 might play 64 empty rows instead - to be confirmed in FT2 (e.g. FRONT.XM)
 - **Volume 0 notes:** a note played at volume 0 (vol column 0x10, Cxx C00) becomes a stop event,
   not a MIDI note (silent in the tracker; Live would raise velocity 0 to 1). Revisit when
   volume slides are converted (lot 4)
@@ -348,10 +335,12 @@ xm2live/
 ├── xm2live.py          # Main conversion orchestrator (+ __version__)
 ├── xm_parser.py        # XM format parser
 ├── mod_parser.py       # MOD format parser
+├── replayer.py         # Playback engine shared by XM and MOD (flow, ticks, tempo)
 ├── envelope_reader.py  # XM volume envelopes (for --envelope)
 ├── als_validator.py    # .als consistency checks (run after each conversion)
 ├── batch_convert.py    # Batch conversion script
-├── tools/              # snapshot.py, render_reference.py, compare_renders.py, audit/
+├── tools/              # snapshot.py, check_collection.py, check_timing.py, render_reference.py,
+│                       # compare_renders.py, audit/
 ├── AUDIT.md            # Measured state + roadmap (lots 0-4)
 ├── TECHNICAL.md        # Technical details and specifications
 ├── README.md           # User documentation
@@ -386,7 +375,7 @@ Before making any changes, read these files in order:
 1. **DO NOT** change the +24 semitone offset for MOD files to +12
 2. **DO NOT** use `np.int16` for delta decoding - use Python int with wrapping
 3. **DO NOT** ignore effect F commands that lack notes
-4. **DO NOT** search patterns by number - use `pattern_order`
+4. **DO NOT** search patterns by number or lay them end to end - use `replayer.play_song()`
 5. **DO NOT** look for `Voices` element - it's `NumVoices`
 6. **DO NOT** add features not explicitly requested
 7. **DO NOT** rewrite working code without a specific bug report
@@ -468,54 +457,20 @@ if 0x10 <= volume_raw <= 0x50:
     decoded_volume = volume_raw - 0x10  # 0x10 → 0, 0x50 → 64
 ```
 
-**Implementation:**
-```python
-# 1. Capture volume 00 events (xm_parser.py:108-145)
-decoded_volume = None
-if volume is not None:
-    if 0x10 <= volume <= 0x50:
-        decoded_volume = volume - 0x10
-
-# Capture volume stop events
-if decoded_volume is not None and decoded_volume == 0:
-    notes.append({'is_volume_stop': True, ...})
-
-# 2. Use volume stops for duration calculation (xm_parser.py:411-438)
-for note in channel_notes:
-    if note.get('is_volume_stop'):
-        continue  # Skip, used only for calculation
-
-    # Find next event (note OR volume stop)
-    for next_event in remaining_notes:
-        if next_event.get('is_volume_stop'):
-            note['duration'] = next_event['time'] - note['time']
-            break
-        if not next_event.get('is_volume_stop'):
-            note['duration'] = next_event['time'] - note['time']
-            break
-
-# 3. Filter volume stops before MIDI creation
-# (automatic via 'continue' in step 2)
-```
-
-**MOD Effect C00:**
-```python
-# mod_parser.py:191-204
-elif effect == 0xC and effect_param == 0x00:
-    pattern_data.append({
-        'is_volume_stop': True,
-        'volume': 0,
-        ...
-    })
-```
+**Implementation (since v2.11.0):**
+- The parsers decode the volume column (above) and Cxx (which wins, FT2 applies it after the
+  volume column) into `Cell.volume`, MOD C00 included
+- `replayer.play_song()` turns a volume of 0 into a stop event on the channel: without a note it
+  ends the current note, with a note the note is not created (silent in the tracker)
+- Stop events only shorten the previous note; they never become MIDI notes
 
 **Key Bug Fixed:**
 ```python
 # WRONG (0 evaluates to False in Python):
 'volume': volume if volume else 64  # ❌ Converts vol 0 → 64!
 
-# CORRECT:
-'volume': 64 if decoded_volume is None else decoded_volume  # ✓
+# CORRECT: test against None
+volume = cell.volume if cell.volume is not None else channel_volume.get(channel, 64)  # ✓
 ```
 
 **Test file:**
@@ -556,7 +511,8 @@ Test files that demonstrate specific features (the regression set is tools/regre
 
 ## Version History Summary
 
-**v2.10.0 (Current)** - Lot 0 of AUDIT.md: tuning/loop fixes, notes without instrument, Cxx, validator, tools
+**v2.11.0 (Current)** - Lot 1 of AUDIT.md: replayer.py (song flow, Fxx tempo automation, EDx, ECx, key-off)
+**v2.10.0** - Lot 0 of AUDIT.md: tuning/loop fixes, notes without instrument, Cxx, validator, tools
 **v2.6.0-v2.9.0** - Template-less conversion, --merge-tracks, --output (see git history)
 **v2.5.0** - Volume 00 support (note stop via volume column decoding, XM + MOD)
 **v2.4.0** - Sample Offset support (effect 9xx via Simpler, optional)

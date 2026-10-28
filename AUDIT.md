@@ -193,7 +193,7 @@ du morceau d'origine resterait visible dans Live.
 | Lot | Contenu | Pourquoi dans cet ordre |
 |---|---|---|
 | **0. Filet de sécurité et corrections rapides** ✅ fait le 28/10/2026 (v2.10.0) | snapshot + validateur + rendu OpenMPT ; notes sans instrument (n° 1) ; `Cxx` en vélocité (n° 5) ; dossier `Samples/` ; restaurer `envelope_reader.py` ; hygiène git, versions, docs | Chaque changement suivant sera mesuré. Gros gain pour peu d'effort |
-| **1. Moteur de lecture** | `replayer.py` : `Dxx`/`Bxx`/`E6x`/`EEx`, `Fxx` en automation de tempo, `EDx`, `ECx`, key-off, état des canaux | Socle commun à `EDx` et à la longueur des notes |
+| **1. Moteur de lecture** ✅ fait le 28/10/2026 (v2.11.0, vérifié ligne par ligne contre libopenmpt : 393/394) | `replayer.py` : `Dxx`/`Bxx`/`E6x`/`EEx`, `Fxx` en automation de tempo, `EDx`, `ECx`, key-off, état des canaux | Socle commun à `EDx` et à la longueur des notes |
 | **2. Longueur des notes** | fin naturelle du sample, suppression du plafond de 4 temps (ou option), key-off et fadeout, enveloppes sans sustain | A besoin du temps au tick et des key-off du lot 1 |
 | **3. Template** | fragments extraits d'un set Live, allocateur d'ID, suppression de buildable, `NoteId`, nettoyage des fichiers temporaires | Indépendant ; peut passer avant le lot 1 si tu préfères |
 | **4. Expression** | glissements de volume et panoramique de la colonne volume en automations, tone portamento en glide (à tester dans Live), calibrage de la courbe vélocité → volume (mesure dans Live) | Le plus subjectif ; à faire une fois la base fiable |

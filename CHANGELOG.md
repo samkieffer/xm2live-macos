@@ -2,6 +2,29 @@
 
 Historique des versions et modifications du projet.
 
+## [2.11.0] - 2026-10-28
+
+Lot 1 de AUDIT.md : moteur de lecture.
+
+### Ajouté
+- ▶️ **`replayer.py`**, commun au XM et au MOD : le morceau est parcouru comme dans le tracker au lieu
+  de mettre les patterns bout à bout.
+  - Déroulé : `Bxx` (saut ; un saut en arrière termine le morceau), `Dxx` (arrêt de pattern),
+    `E6x` (boucle), `EEx` (délai de pattern). Un ordre pointant vers un pattern absent est sauté.
+  - Tempo : chaque `Fxx` (speed ou BPM) s'applique là où il apparaît et devient une **automation de
+    tempo** en escalier dans Live (BPM Live = BPM × 6 / speed).
+  - Au tick près : `EDx` (note delay ; au-delà de la ligne la note n'est pas jouée), `ECx` (note cut),
+    **key-off** (la note s'arrête).
+- 🎯 `tools/check_timing.py` : compare le déroulé ligne par ligne (ordre, ligne, speed, BPM) à
+  libopenmpt. **393 modules sur 394 identiques** (le dernier n'est pas un module).
+
+### Corrigé
+- ⏱️ Timeline : environ 50 modules étaient décalés de plus de 5 % (patterns coupés par `Dxx`, sauts,
+  changements de tempo ignorés). BDTN.XM durait 66 % de trop.
+- 🎵 MOD : le tempo initial ne lisait que le premier `Fxx` d'un pattern. KEEPCOOL.MOD (speed 4,
+  130 BPM) sortait à 130 BPM au lieu de 195.
+- 🎚️ Tempo écrit par chemins explicites dans le set au lieu de chercher la valeur « 120 ».
+
 ## [2.10.0] - 2026-10-28
 
 Lot 0 de AUDIT.md : filet de sécurité et corrections rapides.
