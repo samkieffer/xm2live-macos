@@ -1,16 +1,6 @@
 import Foundation
 import Combine
 
-/// Options de conversion exposées dans l'interface, correspondant aux flags CLI de xm2live.py.
-struct ConversionOptions {
-    var panAutomation = true
-    var sampleOffset = true
-    var envelope = false
-    var mergeTracks = false
-    /// Dossier de sortie racine choisi par l'utilisateur. nil = "à côté du fichier source".
-    var outputRoot: URL? = nil
-}
-
 @MainActor
 final class Converter: ObservableObject {
     @Published var log: String = ""
@@ -36,7 +26,7 @@ final class Converter: ObservableObject {
     }
 
     /// Répertoire contenant xm2live.py : ressources embarquées en priorité,
-    /// sinon repli sur le projet à /Users/sam/xm2live_v2.
+    /// sinon repli sur le dossier du projet (utile en mode `swift run` dev).
     static func scriptsDirectory() -> URL {
         let fm = FileManager.default
         if let res = Bundle.main.resourceURL {
@@ -45,7 +35,7 @@ final class Converter: ObservableObject {
                 return bundled
             }
         }
-        return URL(fileURLWithPath: "/Users/sam/xm2live_v2", isDirectory: true)
+        return URL(fileURLWithPath: "/Users/sam/Claude projets/XM2Live", isDirectory: true)
     }
 
     // MARK: - Découverte des fichiers
@@ -80,9 +70,20 @@ final class Converter: ObservableObject {
         task?.cancel()
     }
 
-    func run(inputs: [URL], options: ConversionOptions) {
+    func run(items: [InputItem], outputRoot: URL?) {
         guard !isRunning else { return }
-        let files = Converter.expand(urls: inputs)
+        // Étend chaque entrée en fichiers, en conservant ses options. Déduplique
+        // par chemin (premier gagne) puis trie par nom de fichier.
+        var seen = Set<String>()
+        var files: [(url: URL, options: TrackOptions)] = []
+        for item in items {
+            for file in Converter.expand(urls: [item.url]) {
+                if seen.insert(file.standardizedFileURL.path).inserted {
+                    files.append((file, item.options))
+                }
+            }
+        }
+        files.sort { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
         guard !files.isEmpty else {
             appendLine("⚠️  Aucun fichier .xm ou .mod trouvé dans la sélection.")
             return
@@ -105,18 +106,19 @@ final class Converter: ObservableObject {
             guard let self else { return }
             var ok = 0, fail = 0
             var produced: [URL] = []
-            for (i, file) in files.enumerated() {
+            for (i, entry) in files.enumerated() {
                 if Task.isCancelled { break }
+                let file = entry.url
                 self.setProgress("Conversion \(i + 1)/\(files.count) — \(file.lastPathComponent)")
                 self.appendLine("\n" + String(repeating: "=", count: 60))
                 self.appendLine("[\(i + 1)/\(files.count)] \(file.lastPathComponent)")
                 self.appendLine(String(repeating: "=", count: 60))
 
-                let args = self.buildArguments(script: script, file: file, options: options)
+                let args = self.buildArguments(script: script, file: file, options: entry.options, outputRoot: outputRoot)
                 let code = await self.launch(python: python, args: args, workingDir: scriptsDir)
                 if code == 0 {
                     ok += 1
-                    produced.append(self.outputProjectDir(for: file, options: options))
+                    produced.append(self.outputProjectDir(for: file, outputRoot: outputRoot))
                 } else {
                     fail += 1
                 }
@@ -138,10 +140,10 @@ final class Converter: ObservableObject {
     /// Dossier du projet Ableton produit pour un fichier donné, en reproduisant
     /// le nommage du script. Sert au flag --output (cas personnalisé) et au
     /// repérage du dossier de destination à ouvrir après conversion.
-    func outputProjectDir(for file: URL, options: ConversionOptions) -> URL {
+    func outputProjectDir(for file: URL, outputRoot: URL?) -> URL {
         let name = file.deletingPathExtension().lastPathComponent
         let projectName = "\(name)_Ableton_Project"
-        if let root = options.outputRoot {
+        if let root = outputRoot {
             return root.appendingPathComponent(projectName, isDirectory: true)
         }
         // Défaut du script : <dossier source>/Conversions Ableton Live/<nom>_Ableton_Project
@@ -150,16 +152,16 @@ final class Converter: ObservableObject {
             .appendingPathComponent(projectName, isDirectory: true)
     }
 
-    private func buildArguments(script: URL, file: URL, options: ConversionOptions) -> [String] {
+    private func buildArguments(script: URL, file: URL, options: TrackOptions, outputRoot: URL?) -> [String] {
         var args = [script.path, file.path]
         if options.panAutomation { args.append("--pan-automation") }
         if options.sampleOffset { args.append("--sample-offset") }
         if options.envelope { args.append("--envelope") }
         if options.mergeTracks { args.append("--merge-tracks") }
-        if options.outputRoot != nil {
+        if outputRoot != nil {
             // Cas personnalisé : on passe explicitement le dossier au script.
             args.append("--output")
-            args.append(outputProjectDir(for: file, options: options).path)
+            args.append(outputProjectDir(for: file, outputRoot: outputRoot).path)
         }
         return args
     }

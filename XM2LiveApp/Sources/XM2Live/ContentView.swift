@@ -5,23 +5,20 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @StateObject private var converter = Converter()
 
-    @State private var options = ConversionOptions()
     @State private var customOutput = false
     @State private var outputRoot: URL? = nil
     @State private var dropTargeted = false
+    /// Lignes sélectionnées dans la liste (sélection simple ou multiple).
+    @State private var selection = Set<URL>()
 
-    private var inputs: [URL] { model.inputs }
-    private var fileCount: Int { Converter.expand(urls: inputs).count }
+    private var items: [InputItem] { model.items }
+    private var fileCount: Int { Converter.expand(urls: items.map(\.url)).count }
 
     var body: some View {
         VStack(spacing: 14) {
             header
 
-            dropZone
-
-            if !inputs.isEmpty {
-                fileListView
-            }
+            filesZone
 
             optionsBox
 
@@ -47,60 +44,131 @@ struct ContentView: View {
         }
     }
 
-    private var dropZone: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "tray.and.arrow.down")
-                .font(.system(size: 30))
-                .foregroundStyle(dropTargeted ? Color.accentColor : .secondary)
-            if inputs.isEmpty {
-                Text("Glissez ici des fichiers .xm / .mod ou un dossier")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("\(inputs.count) élément(s) sélectionné(s) — \(fileCount) fichier(s) à convertir")
-                    .foregroundStyle(.primary)
+    /// Zone unique : vide avec instructions au départ, se remplit avec la liste
+    /// des morceaux ajoutés. Cible de drop, avec overlay pendant le glisser.
+    private var filesZone: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(items.isEmpty
+                     ? "Morceaux à convertir"
+                     : "Morceaux à convertir — \(fileCount) fichier(s)")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                if !items.isEmpty {
+                    Button("Tout effacer") { model.clear(); selection.removeAll() }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
             }
+
+            ZStack {
+                if items.isEmpty {
+                    emptyState
+                } else {
+                    filledState
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 190, maxHeight: 260)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6]))
+                    .foregroundStyle(dropTargeted ? Color.accentColor : Color.secondary.opacity(0.4))
+            )
+            .overlay {
+                if dropTargeted { finderDropOverlay }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+                handleDrop(providers)
+            }
+            .animation(.easeInOut(duration: 0.15), value: dropTargeted)
+        }
+        // Garde la sélection cohérente si la liste change (suppression via X, effacement…).
+        .onChange(of: items) { _, newItems in
+            selection = selection.intersection(Set(newItems.map(\.url)))
+        }
+    }
+
+    /// État vide : instructions centrées et bouton de sélection manuelle.
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "tray.and.arrow.down")
+                .font(.system(size: 34))
+                .foregroundStyle(.secondary)
+            Text("Glissez ici des fichiers .xm / .mod ou un dossier")
+                .foregroundStyle(.secondary)
             Button("Choisir des fichiers…") { chooseFiles() }
                 .buttonStyle(.bordered)
-            if !inputs.isEmpty {
-                Button("Effacer la sélection") { model.clear() }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-            }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 22)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6]))
-                .foregroundStyle(dropTargeted ? Color.accentColor : Color.secondary.opacity(0.4))
-        )
-        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
-            handleDrop(providers)
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var fileListView: some View {
-        GroupBox {
-            ScrollView {
-                VStack(spacing: 2) {
-                    ForEach(inputs, id: \.self) { url in
-                        fileRow(url)
-                        if url != inputs.last { Divider() }
-                    }
+    /// État rempli : liste sélectionnable + barre d'actions.
+    private var filledState: some View {
+        VStack(spacing: 0) {
+            List(selection: $selection) {
+                ForEach(items) { item in
+                    fileRow(item).tag(item.url)
                 }
-                .padding(4)
             }
-            .frame(maxHeight: 150)
-        } label: {
-            Text("Morceaux à convertir — \(fileCount) fichier(s)")
+            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .scrollContentBackground(.hidden)
+            .onDeleteCommand(perform: removeSelected)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Text(selection.isEmpty
+                     ? "Cmd/Maj-clic pour sélectionner plusieurs morceaux."
+                     : "\(selection.count) morceau(x) sélectionné(s)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button { chooseFiles() } label: {
+                    Label("Ajouter…", systemImage: "plus")
+                }
+                .controlSize(.small)
+                Button { removeSelected() } label: {
+                    Label("Retirer la sélection", systemImage: "trash")
+                }
+                .controlSize(.small)
+                .disabled(selection.isEmpty)
+                .help("Retirer les morceaux sélectionnés (touche Suppr)")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
         }
     }
 
-    private func fileRow(_ url: URL) -> some View {
+    /// Overlay affiché pendant un glisser de fichiers (style SNFReels) :
+    /// fond assombri, bord pointillé, gros « + » et libellé. Laisse passer
+    /// le drop vers la zone sous-jacente (allowsHitTesting false).
+    private var finderDropOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(
+                    Color.white.opacity(0.6),
+                    style: StrokeStyle(lineWidth: 2, dash: [8, 6])
+                )
+                .padding(8)
+            VStack(spacing: 14) {
+                Image(systemName: "plus")
+                    .font(.system(size: 56, weight: .light))
+                Text("Ajouter des morceaux")
+                    .font(.system(size: 18, weight: .regular))
+            }
+            .foregroundStyle(Color.white.opacity(0.9))
+        }
+        .allowsHitTesting(false)
+        .transition(.opacity)
+    }
+
+    private func fileRow(_ item: InputItem) -> some View {
+        let url = item.url
         let isDir = Self.isDirectory(url)
         return HStack(spacing: 8) {
             Image(systemName: isDir ? "folder.fill" : "music.note")
@@ -115,28 +183,70 @@ struct ContentView: View {
                     .lineLimit(1).truncationMode(.middle)
             }
             Spacer()
+            // Options de conversion propres à ce morceau (icônes activables).
+            HStack(spacing: 1) {
+                ForEach(trackOptionDescriptors) { desc in
+                    optionIconButton(item: item, desc: desc)
+                }
+            }
             Button {
-                model.remove(url)
+                remove(url)
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
-            .help("Retirer de la sélection")
+            .help("Retirer ce morceau")
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
     }
 
+    /// Bouton-icône d'une option pour un morceau : teinté si actif, atténué sinon.
+    private func optionIconButton(item: InputItem, desc: OptionDescriptor) -> some View {
+        let active = item.options[keyPath: desc.keyPath]
+        return Button {
+            model.setOption(for: item.url, desc.keyPath, to: !active)
+        } label: {
+            Image(systemName: desc.icon)
+                .font(.system(size: 12))
+                .foregroundStyle(active ? Color.optionIcon : Color.secondary.opacity(0.4))
+                .frame(width: 22, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help("\(desc.help) — \(active ? "activé" : "désactivé")")
+    }
+
     private var optionsBox: some View {
         GroupBox("Options de conversion") {
             VStack(alignment: .leading, spacing: 6) {
-                Toggle("Pan automation (effet 8xx)", isOn: $options.panAutomation)
-                Toggle("Sample offset (effet 9xx, via Simpler)", isOn: $options.sampleOffset)
-                Toggle("Enveloppes FT2 → ADSR (expérimental)", isOn: $options.envelope)
-                Toggle("Merge tracks (piste « All notes » par instrument)", isOn: $options.mergeTracks)
+                ForEach(trackOptionDescriptors) { desc in
+                    let state = model.aggregateState(desc.keyPath)
+                    HStack(spacing: 8) {
+                        TriStateCheckbox(
+                            title: "",
+                            state: state,
+                            onToggle: { newValue in model.setAll(desc.keyPath, to: newValue) }
+                        )
+                        .fixedSize()
+                        // Icône (rappel de la légende des contrôles par ligne) + libellé.
+                        HStack(spacing: 6) {
+                            Image(systemName: desc.icon)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color.optionIcon)
+                                .frame(width: 20)
+                            Text(desc.label)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.setAll(desc.keyPath, to: state != .on) }
+                        Spacer()
+                    }
+                }
+                Text("S'applique à tous les morceaux — modifiable ligne par ligne.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.top, 2)
             }
-            .toggleStyle(.checkbox)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
@@ -196,7 +306,7 @@ struct ContentView: View {
                 Button("Convertir") { startConversion() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: [])
-                    .disabled(inputs.isEmpty || (customOutput && outputRoot == nil))
+                    .disabled(items.isEmpty || (customOutput && outputRoot == nil))
             }
         }
     }
@@ -208,9 +318,21 @@ struct ContentView: View {
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
     }
 
+    /// Retire un morceau (croix « X ») et nettoie la sélection.
+    private func remove(_ url: URL) {
+        model.remove(url)
+        selection.remove(url)
+    }
+
+    /// Retire tous les morceaux actuellement sélectionnés.
+    private func removeSelected() {
+        guard !selection.isEmpty else { return }
+        for url in selection { model.remove(url) }
+        selection.removeAll()
+    }
+
     private func startConversion() {
-        options.outputRoot = customOutput ? outputRoot : nil
-        converter.run(inputs: inputs, options: options)
+        converter.run(items: model.items, outputRoot: customOutput ? outputRoot : nil)
     }
 
     private func chooseFiles() {
