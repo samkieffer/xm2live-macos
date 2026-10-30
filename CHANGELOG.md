@@ -2,6 +2,33 @@
 
 Historique des versions et modifications du projet.
 
+## [2.12.0] - 2026-10-28
+
+Lot 2 de AUDIT.md : longueur des notes.
+
+### Modifié
+- 🎹 **Plus de plafond de 4 temps** : une note dure tant que le tracker la fait entendre. Elle s'arrête
+  à la note suivante du canal, à la fin du sample s'il ne boucle pas (calculée avec la hauteur jouée
+  et les changements de tempo), quand l'enveloppe de volume retombe à 0, ou quand le volume du canal
+  tombe à 0 pour de bon. Sur la collection : 500 000 notes raccourcies (batteries à la longueur du
+  sample) et 25 000 rallongées, dont 11 000 nappes en boucle qui étaient coupées à 4 temps.
+- 🔉 **Glissements de volume** (`Axy`, `5xy`, `6xy`, `EAx`/`EBx`, colonne volume `6x`-`9x`) suivis au
+  tick près, avec la mémoire des effets FT2 : un fondu jusqu'à 0 termine la note (90 fichiers). Un
+  silence suivi d'une reprise avant la note suivante (volume haché ligne par ligne, numéro
+  d'instrument seul qui remet le volume) ne coupe pas la note.
+- 🔑 **Key-off et fadeout** : sans enveloppe, coupure immédiate ; avec enveloppe, la note s'arrête au
+  key-off et la fin du son FT2 (fadeout, fin de l'enveloppe) devient la **release du Sampler** de
+  l'instrument (103 instruments dans 38 fichiers). Avec un fadeout nul et une enveloppe qui ne
+  retombe pas à 0, le key-off est ignoré, comme dans FT2 (164 key-offs).
+- 🔇 Une note jouée à volume 0 puis remontée (fondu d'entrée, `C00` suivi de `Cxx`) existe désormais,
+  avec la vélocité du volume le plus haut atteint (368 notes). Les notes jouées sur un sample à volume
+  0 sans remontée disparaissent (654 notes, déjà muettes dans Live).
+
+### Technique
+- `xm_parser.py` lit l'enveloppe de volume et le fadeout de chaque instrument et garde les commandes
+  de la colonne volume (`Cell.volume_effect`) ; `envelope_reader.py` est supprimé (`--envelope`
+  utilise l'enveloppe du parser, mêmes valeurs ADSR).
+
 ## [2.11.0] - 2026-10-28
 
 Lot 1 de AUDIT.md : moteur de lecture.

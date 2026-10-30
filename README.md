@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.11.0** (support XM + MOD + Volume + Panning + Sample Offset + Volume 00 + Enveloppes expérimentales ; voir CHANGELOG.md et AUDIT.md)
+**Version actuelle : 2.12.0** (support XM + MOD + Volume + Panning + Sample Offset + Volume 00 + Enveloppes expérimentales ; voir CHANGELOG.md et AUDIT.md)
 
 ## 🎵 Fonctionnalités
 
@@ -221,7 +221,7 @@ Les periods ProTracker sont convertis en notes MIDI avec +24 semitones :
 | 214    | C-3            | C-5       | 72          |
 
 ### Durées des notes
-Les notes utilisent la durée jusqu'à la prochaine note sur le même canal (max 4 beats) pour simuler le comportement monophonique des trackers.
+Une note dure tant que le tracker la fait entendre : jusqu'à la note suivante du canal (un canal = une voix), la fin du sample s'il ne boucle pas, la fin de l'enveloppe de volume, un volume qui tombe à 0 pour de bon (glissements compris) ou un key-off. Après un key-off, le fadeout FT2 devient la release du Sampler. Pas de plafond : une nappe en boucle tient aussi longtemps que dans le tracker.
 
 ### Loops
 - **XM** : Support Forward (1) et Ping-Pong (2)

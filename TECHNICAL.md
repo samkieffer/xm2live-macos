@@ -24,6 +24,8 @@ xm2live/
 ├── xm2live.py           # Point d'entrée, orchestration
 ├── xm_parser.py         # Parser FastTracker 2 XM
 ├── mod_parser.py        # Parser Amiga ProTracker MOD
+├── replayer.py          # Moteur de lecture : déroulé, tempo, longueur des notes
+├── als_validator.py     # Vérification du set produit
 ├── batch_convert.py     # Conversion batch
 └── template_100_tracks.als
 ```
@@ -37,7 +39,7 @@ xm2live/
         ↓
    [samples, patterns, info]
         ↓
-   [organize_tracks_by_channel]
+   [replayer.play_song : déroulé, ticks, tempo, longueur des notes]
         ↓
    [tracks_data: {channel: {instrument: [notes]}}]
         ↓
@@ -320,47 +322,28 @@ BPM_réel = BPM × (6 / Speed)
 - Speed=3, BPM=125 → 250.00 BPM
 - Speed=12, BPM=125 → 62.50 BPM
 
-### Détection Speed/BPM
+### Déroulé, tempo et longueur des notes (`replayer.py`)
+
+`play_song()` parcourt `pattern_order` comme le tracker : sauts (`Bxx`, un saut en arrière termine le
+morceau), arrêts de pattern (`Dxx`), boucles (`E6x`), délais de pattern (`EEx`). Chaque `Fxx` change
+la vitesse (< 32) ou le BPM (>= 32) dès sa ligne et devient une automation de tempo
+(BPM Live = BPM × 6 / speed). Les événements sont placés au tick près : 1 tick = 1/(4 × speed) temps.
+
+Longueur d'une note : tant que le tracker la fait entendre, sans plafond. La note suivante du canal
+la coupe (un canal = une voix) ; sinon elle s'arrête au premier de ces événements :
 
 ```python
-# Chercher effet F dans patterns
-for pattern_idx in pattern_order[:10]:
-    for note_data in pattern['data']:
-        if note_data['effect'] == 0xF:
-            param = note_data['effect_param']
-            if param <= 0x1F:
-                speed = param
-            else:
-                bpm = param
+# Fin naturelle d'un sample sans boucle (même hauteur que dans Live)
+secondes = frames / (8363 * 2 ** ((note - 60 + relative_note) / 12 + cents / 1200))
+# Enveloppe de volume qui retombe à 0 pour de bon, note tenue
+fin = début + tick_du_premier_point_de_la_série_finale_à_0 * (0.25 / speed)
+# Volume du canal à 0 pour de bon (Cxx, colonne volume, glissements, ECx, key-off),
+# sauf si le volume remonte avant la note suivante (volume haché ligne par ligne)
 ```
 
-### Durées de notes intelligentes
-
-```python
-# Organiser par canal
-notes_by_channel = defaultdict(list)
-
-# Collecter toutes les notes
-for pattern in patterns:
-    for note in pattern['data']:
-        notes_by_channel[channel].append({
-            'time': absolute_time,
-            'note': midi_note,
-            'duration': 0
-        })
-
-# Calculer durées
-for channel, notes in notes_by_channel.items():
-    notes.sort(key=lambda n: n['time'])
-    for i, note in enumerate(notes):
-        if i + 1 < len(notes):
-            interval = notes[i+1]['time'] - note['time']
-            note['duration'] = min(interval, 4.0)  # Max 4 beats
-        else:
-            note['duration'] = 4.0
-```
-
-**Raison:** Simule le comportement monophonique des trackers où chaque canal a 1 voix.
+Après un key-off, sans enveloppe de volume le son est coupé ; avec une enveloppe, la note s'arrête
+au key-off et la fin du son FT2 (fadeout : 32768 / fadeout ticks, ou fin de l'enveloppe) devient la
+release du Sampler. Un son en boucle que rien n'arrête dure jusqu'à la fin du morceau.
 
 ---
 

@@ -118,12 +118,14 @@ def parse_pattern_data(data, num_rows, num_channels):
                     effect_param = data[pos + 3]
                     pos += 4
 
-            # Décoder la colonne volume XM (0x10-0x50 = volume 0-64)
+            # Décoder la colonne volume XM (0x10-0x50 = volume 0-64, 0x60+ = commandes)
             decoded_volume = None
+            volume_effect = None
             if volume is not None:
                 if 0x10 <= volume <= 0x50:
                     decoded_volume = volume - 0x10  # 0x10 -> 0, 0x50 -> 64
-                # Ignorer les autres valeurs (0x00-0x0F, 0x60+ sont des commandes spéciales)
+                elif volume >= 0x60:
+                    volume_effect = volume  # glissements, panoramique... (octet brut)
 
             # Effet Cxx (Set Volume) : FT2 l'applique après la colonne volume, il est donc prioritaire
             if effect_type == 0x0C:
@@ -137,12 +139,43 @@ def parse_pattern_data(data, num_rows, num_channels):
                 midi_note = note - 1 + 12
 
             effect, param = effect_type or 0, effect_param or 0
-            if midi_note is None and not instrument and decoded_volume is None and not effect and not param:
+            if (midi_note is None and not instrument and decoded_volume is None and volume_effect is None
+                    and not effect and not param):
                 row_cells.append(None)
             else:
-                row_cells.append(Cell(midi_note, instrument or None, decoded_volume, effect, param))
+                row_cells.append(Cell(midi_note, instrument or None, decoded_volume, effect, param, volume_effect))
 
     return rows
+
+
+def read_volume_envelope(extra):
+    """Enveloppe de volume et fadeout d'un instrument
+
+    Args:
+        extra: suite de l'en-tête d'instrument, après la taille d'en-tête de sample (octet 33) :
+            table note → sample (96), points volume (12 × 2 mots), points panoramique, nombres de
+            points, sustain et boucle, types, vibrato, fadeout
+
+    Returns:
+        (envelope, fadeout) ; envelope = {'enabled', 'sustain_enabled', 'loop_enabled', 'num_points',
+        'points' [(tick, valeur 0-64)], 'sustain_point', 'loop_start', 'loop_end'}
+    """
+    extra = extra + bytes(max(0, 208 - len(extra)))  # en-tête court : champs absents à 0
+    num_points = min(extra[192], 12)
+    env_type = extra[200]
+    points = [struct.unpack_from('<HH', extra, 96 + 4 * k) for k in range(num_points)]
+    envelope = {
+        'enabled': bool(env_type & 1) and num_points > 0,
+        'sustain_enabled': bool(env_type & 2),
+        'loop_enabled': bool(env_type & 4),
+        'num_points': num_points,
+        'points': points,
+        'sustain_point': extra[194],
+        'loop_start': extra[195],
+        'loop_end': extra[196],
+    }
+    fadeout = struct.unpack_from('<H', extra, 206)[0]
+    return envelope, fadeout
 
 
 def read_patterns(f, num_patterns, num_channels):
@@ -245,8 +278,8 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                     sample_header_size = struct.unpack('<I', f.read(4))[0]
 
                     remaining = inst_header_size - 33
-                    if remaining > 0:
-                        f.read(remaining)
+                    extra = f.read(remaining) if remaining > 0 else b''
+                    envelope, fadeout = read_volume_envelope(extra)
 
                     # Lire les headers de samples
                     sample_headers = []
@@ -334,7 +367,9 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                                     'loop_type': loop_type,
                                     'volume': header['volume'],
                                     'panning': header['panning'],  # 0-255 (0=gauche, 128=centre, 255=droite)
-                                    'length': len(decoded)  # Longueur en samples (pour effet 9xx)
+                                    'length': len(decoded),  # Longueur en samples (pour effet 9xx)
+                                    'envelope': envelope,  # enveloppe de volume de l'instrument
+                                    'fadeout': fadeout
                                 })
 
                                 print(f"    ✓ {safe_name}")

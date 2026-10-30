@@ -22,7 +22,7 @@ cp "$BUILD_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
 # Embarque les scripts Python et ressources nécessaires à la conversion.
 echo "==> Copie des scripts Python"
-for f in xm2live.py xm_parser.py mod_parser.py replayer.py als_validator.py envelope_reader.py batch_convert.py \
+for f in xm2live.py xm_parser.py mod_parser.py replayer.py als_validator.py batch_convert.py \
          minimal_template.py create_template_200.py simpler_template.xml \
          requirements.txt; do
     if [ -f "$PROJECT_DIR/$f" ]; then

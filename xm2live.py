@@ -34,7 +34,7 @@ from minimal_template import get_minimal_template_root
 from als_validator import validate_als, print_report
 
 # Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
-__version__ = '2.11.0'
+__version__ = '2.12.0'
 
 def update_all_ids(element, next_id):
     """
@@ -322,6 +322,7 @@ def update_sampler_sample(track, sample_info, project_dir, template_sample_part,
         envelope_info = sample_info.get('envelope')
         if envelope_info and envelope_info.get('enabled'):
             configure_envelope_adsr(sampler, envelope_info, bpm, speed)
+    configure_release(sampler, sample_info, bpm)
 
     return True
 
@@ -671,6 +672,7 @@ def populate_track_with_simpler(track, sample_info, project_dir, next_id, bpm=12
             # Note: configure_envelope_adsr() supporte déjà Simpler
             # Car il cherche VolumeAndPan/Envelope qui existe dans les deux devices
             configure_envelope_adsr(simpler, envelope_info, bpm, speed)
+    configure_release(simpler, sample_info, bpm)
 
     print(f"    ✅ Simpler configuré (effet 9xx supporté)")
 
@@ -1422,6 +1424,26 @@ def configure_envelope_adsr(sampler, envelope_info, bpm, speed):
     return True
 
 
+LIVE_RELEASE_MAX_MS = 60000  # borne du paramètre Release du Sampler et du Simpler
+
+
+def configure_release(device, sample_info, bpm):
+    """Release du Sampler / Simpler = fin du son FT2 après un key-off
+
+    Seulement pour les instruments qu'un key-off arrête avec une release (enveloppe de volume avec
+    fadeout ou qui retombe à 0, cf. replayer.release_ticks) : la note MIDI s'arrête au key-off et le
+    Sampler fait la fin du son. Les autres gardent la release du template.
+    """
+    ticks = sample_info.get('release_ticks')
+    if not ticks:
+        return
+    release_ms = min(ticks * 2500.0 / bpm, LIVE_RELEASE_MAX_MS)  # 1 tick = 2,5 / BPM secondes
+    release = device.find('.//VolumeAndPan/Envelope/ReleaseTime/Manual')
+    if release is not None:
+        release.set('Value', str(release_ms))
+        print(f"    → Release: {release_ms:.0f} ms (fin du son FT2 après un key-off)")
+
+
 def merge_and_deduplicate_notes(notes_lists):
     """Fusionne plusieurs listes de notes et déduplique les notes identiques au même moment
 
@@ -1864,39 +1886,22 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         print("\n❌ Aucun sample extrait !")
         return False
 
-    # Lire les enveloppes si activé (fonction séparée, plus sûr)
-    if enable_envelope and not is_mod:  # Seulement pour XM, pas MOD
-        try:
-            from envelope_reader import read_xm_envelopes
-        except ImportError:
-            print("⚠️  AVERTISSEMENT: Le module envelope_reader n'est pas disponible.")
-            print("   La conversion des enveloppes est désactivée.")
-            enable_envelope = False
-        else:
-            print(f"\n🎛️  Lecture des enveloppes volume...")
-            envelopes = read_xm_envelopes(xm_path)
-            # Merger les enveloppes avec les samples
-            for sample in samples:
-                inst_num = sample['instrument']
-                if inst_num in envelopes:
-                    sample['envelope'] = envelopes[inst_num]
-                else:
-                    # Enveloppe par défaut
-                    sample['envelope'] = {
-                        'enabled': False,
-                        'sustain_enabled': False,
-                        'num_points': 0,
-                        'sustain_point': 0,
-                        'points': []
-                    }
-            print(f"    → {len(envelopes)} enveloppes chargées")
+    # Enveloppes de volume (lues par xm_parser.py ; le format MOD n'en a pas)
+    if enable_envelope:
+        with_envelope = {s['instrument'] for s in samples if (s.get('envelope') or {}).get('enabled')}
+        print(f"\n🎛️  Enveloppes volume: {len(with_envelope)} instrument(s)")
 
-    # Jouer le morceau comme le tracker : ordre de lecture réel, ticks, changements de tempo
+    # Jouer le morceau comme le tracker : ordre de lecture réel, ticks, changements de tempo,
+    # longueur réelle des notes (fin du sample, enveloppe, volume, key-off)
     song = play_song(patterns, xm_info['pattern_order'], xm_info['tempo'], xm_info['bpm'],
-                     'mod' if is_mod else 'xm')
+                     'mod' if is_mod else 'xm', samples)
     tracks_data = song['tracks']
     tempo_changes = song['tempo_changes']
     minutes, secs = divmod(song['duration_seconds'], 60)
+    # Instruments arrêtés par un key-off avec release : la fin du son devient la release du Sampler
+    for sample in samples:
+        if sample['instrument'] in song['released_instruments']:
+            sample['release_ticks'] = song['released_instruments'][sample['instrument']]
 
     print(f"\n{'='*60}")
     print(f"MODULE: {xm_info['name']}")
