@@ -71,30 +71,12 @@ def batch_convert(directory, template_path=None, recursive=True, enable_pan_auto
     # Normaliser le chemin du répertoire racine
     root_directory = os.path.abspath(directory)
 
-    # Trouver le template
-    if not template_path:
-        # Chercher le template dans plusieurs endroits
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        template_next_to_script = os.path.join(script_dir, "template_100_tracks.als")
-        current_dir_template = "./template_100_tracks.als"
-
-        if os.path.exists(template_next_to_script):
-            template_path = template_next_to_script
-        elif os.path.exists(current_dir_template):
-            template_path = current_dir_template
-        else:
-            print("❌ ERREUR: Template non trouvé!")
-            print(f"   Cherché dans:")
-            print(f"   - {template_next_to_script}")
-            print(f"   - {current_dir_template}")
-            print(f"\n💡 Spécifiez le chemin du template avec --template")
-            return False
-
-    if not os.path.exists(template_path):
+    # Template : les fragments de templates/ par défaut, ou un set Live personnel (--template)
+    if template_path and not os.path.exists(template_path):
         print(f"❌ ERREUR: Template '{template_path}' n'existe pas!")
         return False
 
-    print(f"\n📋 Template: {os.path.basename(template_path)}\n")
+    print(f"\n📋 Template: {os.path.basename(template_path) if template_path else 'templates/'}\n")
 
     # Trouver tous les fichiers
     files = find_tracker_files(directory, recursive)
@@ -261,7 +243,7 @@ Exemples:
 
     parser.add_argument(
         '--template', '-t',
-        help='Chemin vers le template Ableton Live (.als)',
+        help='Set Live personnel (.als) dont reprendre les fragments (défaut : templates/)',
         default=None
     )
 

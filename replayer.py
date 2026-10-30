@@ -18,7 +18,7 @@ l'enveloppe) devient la release du Sampler (instruments listés dans 'released_i
 """
 
 import math
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import defaultdict, namedtuple
 
 # Une case de pattern, identique pour XM et MOD (une case vide vaut None)
@@ -166,6 +166,33 @@ def volume_commands(cell, sub_effect, file_format, memory):
     return fine, column, slide
 
 
+def pan_commands(cell, file_format, memory):
+    """Panoramique d'une case : (valeur fixée au tick de la case ou None, colonne par tick, effet par tick)
+
+    XM seulement : colonne volume Cx fixe x × 16 et Dx / Ex glissent de -x / +x par tick ; l'effet
+    8xx fixe xx et Pxy glisse de +x par tick (sinon -y), un paramètre nul reprenant le précédent.
+    8xx est appliqué après la colonne volume, comme dans FT2.
+    """
+    if file_format != 'xm':
+        return None, 0, 0
+    value, column, slide = None, 0, 0
+    if cell.volume_effect is not None:
+        kind, amount = cell.volume_effect >> 4, cell.volume_effect & 0xF
+        if kind == 0xC:
+            value = amount << 4
+        elif kind == 0xD:
+            column = -amount
+        elif kind == 0xE:
+            column = amount
+    if cell.effect == 0x8:
+        value = cell.param
+    elif cell.effect == 0x19:
+        param = cell.param or memory['pan_slide']
+        memory['pan_slide'] = param
+        slide = param >> 4 if param & 0xF0 else -(param & 0xF)
+    return value, column, slide
+
+
 def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
     """Joue le morceau et produit les notes par canal et par instrument
 
@@ -178,7 +205,9 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
             sans eux, les notes durent jusqu'à l'événement suivant de leur canal
 
     Returns:
-        dict avec 'tracks' {canal: {instrument: [notes]}}, 'tempo_changes' [(temps, BPM Live)],
+        dict avec 'tracks' {canal: {instrument: [notes]}} (une note : time, duration, note, velocity,
+        pan 0-255 au début de la note, pan_moves [(temps, pan)] pendant la note, sample_offset_xm),
+        'tempo_changes' [(temps, BPM Live)],
         'end_time' (temps), 'duration_seconds', 'released_instruments' (instruments dont un key-off
         lance une release : {instrument: ticks}) et 'played_rows' [(ordre, ligne, speed, bpm)]
         (déroulé ligne par ligne, comparé à OpenMPT par tools/check_timing.py)
@@ -186,6 +215,7 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
     # Son de chaque instrument : son dernier sample, comme les pistes Live (xm2live.py)
     instrument_samples = {s['instrument']: s for s in samples}
     default_volume = {i: min(s.get('volume', 64), 64) for i, s in instrument_samples.items()}
+    default_pan = {i: s.get('panning', 128) for i, s in instrument_samples.items()}
     silence = {i: envelope_silence(s.get('envelope')) for i, s in instrument_samples.items()}
     release = {i: release_ticks(s.get('envelope'), s.get('fadeout', 0)) for i, s in instrument_samples.items()}
 
@@ -201,7 +231,11 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
     level = {}
     playing = {}  # instrument de la dernière note jouée (pour le key-off)
     fading_in = {}  # note partie à volume 0 : elle prendra la vélocité du volume le plus haut atteint
-    memory = defaultdict(lambda: {'slide': 0, 'fine_up': 0, 'fine_down': 0})
+    # Panoramique du canal (FT2) : un numéro d'instrument le remet au défaut du sample, Cx et 8xx le
+    # fixent jusqu'au prochain numéro d'instrument, les glissements le déplacent tick par tick
+    pan = {}
+    pan_moves = defaultdict(list)  # canal -> [(temps, panoramique)] à chaque changement
+    memory = defaultdict(lambda: {'slide': 0, 'fine_up': 0, 'fine_down': 0, 'pan_slide': 0})
     loop_start = defaultdict(int)  # E6x : ligne de début de boucle, par canal
     loop_count = defaultdict(int)
     released_instruments = {}
@@ -226,6 +260,12 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
         if value and channel in fading_in:
             note = fading_in[channel]
             note['peak'] = max(note['peak'], velocity(channel_volume.get(channel, 64)))
+
+    def set_pan(channel, value, at):
+        value = max(0, min(255, value))
+        if pan.get(channel, 128) != value:
+            pan[channel] = value
+            pan_moves[channel].append((at, value))
 
     def slide_volume(channel, delta, at):
         """Glissement : les deux volumes bougent de `delta`, bornés à 0-64"""
@@ -306,17 +346,21 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                 continue
             at = time + delay * tick
             fine, column_slide, effect_slide = volume_commands(cell, sub_effect, file_format, memory[channel])
+            pan_value, pan_column_slide, pan_effect_slide = pan_commands(cell, file_format, memory[channel])
             # ECx : volume à 0 au tick x (FT2 et ProTracker coupent le son en mettant le volume à 0)
             cut = param & 0xF if sub_effect == 0xC and (param & 0xF) < speed else None
 
             def run_ticks(first, last):
                 """Glissements par tick (sauf le tick 0 de chaque répétition de la ligne) et ECx"""
-                if not (column_slide or effect_slide or cut is not None):
+                if not (column_slide or effect_slide or pan_column_slide or pan_effect_slide or cut is not None):
                     return
                 for t in range(first, last):
                     if t % speed:
                         slide_volume(channel, column_slide, time + t * tick)
                         slide_volume(channel, effect_slide, time + t * tick)
+                        if pan_column_slide or pan_effect_slide:
+                            set_pan(channel, pan.get(channel, 128) + pan_column_slide + pan_effect_slide,
+                                    time + t * tick)
                     if t == cut:
                         channel_volume[channel] = 0
                         set_level(channel, 0, time + t * tick)
@@ -329,8 +373,11 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                 channel_instrument[channel] = cell.instrument
                 channel_volume[channel] = 64  # un numéro d'instrument remet le volume par défaut
                 new_level = default_volume.get(cell.instrument, 64)
+                set_pan(channel, default_pan.get(cell.instrument, 128), at)
             if cell.volume is not None:
                 channel_volume[channel] = new_level = cell.volume
+            if pan_value is not None:
+                set_pan(channel, pan_value, at)
 
             if cell.note == KEY_OFF:
                 set_level(channel, new_level, at)
@@ -352,7 +399,7 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                     # vélocité du volume le plus haut atteint ; la forme du fondu est pour le lot 4
                     'velocity': velocity(channel_volume.get(channel, 64)) if new_level else None,
                     'peak': 0,
-                    'panning_xm': param if file_format == 'xm' and effect == 0x8 else None,
+                    'pan': pan.get(channel, 128),
                     'sample_offset_xm': param if effect == 0x9 else None,
                 }
                 events[channel].append(note)
@@ -409,6 +456,8 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
     tracks = defaultdict(lambda: defaultdict(list))
     for channel, channel_events in events.items():
         channel_events.sort(key=lambda e: e['time'])
+        moves = sorted(pan_moves[channel], key=lambda m: m[0])
+        move_times = [m[0] for m in moves]
         for i, event in enumerate(channel_events):
             if event['kind'] != 'note':
                 continue
@@ -434,12 +483,15 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
             duration = end - event['time']
             if duration <= 0 or not note_velocity:
                 continue  # coupée sur le tick où elle commence (EC0), ou jamais audible
+            # Changements de panoramique pendant la note (après le tick où elle commence)
+            first, last = bisect_right(move_times, event['time']), bisect_left(move_times, end)
             tracks[channel][event['instrument']].append({
                 'time': event['time'],
                 'note': event['note'],
                 'velocity': note_velocity,
                 'duration': duration,
-                'panning_xm': event['panning_xm'],
+                'pan': event['pan'],
+                'pan_moves': moves[first:last],
                 'sample_offset_xm': event['sample_offset_xm'],
             })
 

@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.12.1** (support XM + MOD + Volume + Panning + Sample Offset + Volume 00 + Enveloppes expérimentales ; voir CHANGELOG.md et AUDIT.md)
+**Version actuelle : 2.13.0** (support XM + MOD + Volume + Panning + Sample Offset + Volume 00 + Enveloppes expérimentales ; voir CHANGELOG.md et AUDIT.md)
 
 ## 🎵 Fonctionnalités
 
@@ -16,7 +16,7 @@ Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MO
 - 🔁 **Loops** - Support Forward et Ping-Pong (XM uniquement)
 - ⏱️ **Tempo** - Calcul automatique du BPM réel à partir de Speed et BPM
 - 🔊 **Volume** - Volume par défaut des samples + vélocité MIDI par note (headroom -12dB)
-- 🎧 **Panning** - Panning par défaut des samples + automations optionnelles (effet 8xx avec `--pan-automation`)
+- 🎧 **Panning** - Panoramique de chaque canal comme dans FT2 (défaut du sample, 8xx, colonne volume Cx, glissements) : fixe par piste, ou automation avec `--pan-automation`
 - 🎚️ **Sample Offset** - Effet 9xx supporté via Simpler (avec `--sample-offset`, limitation ping-pong→forward)
 - 🔇 **Volume 00 (Note Stop)** - Les volumes 00 raccourcissent automatiquement les notes (XM + MOD effet C00)
 - 🎛️ **Enveloppes** - Conversion expérimentale FT2 → ADSR Ableton (avec `--envelope`, approximation)
@@ -33,15 +33,13 @@ Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MO
 
 ### Bibliothèques Python
 ```bash
-pip install buildable numpy lxml
+pip install numpy lxml
 ```
 
 ### Template Ableton
-Un fichier template `.als` avec 100 pistes MIDI, chacune contenant un Sampler.
-
-**Le template est inclus :**
-- Fichier fourni : `template_100_tracks.als` (dans le répertoire du script)
-- Vous pouvez utiliser votre propre template avec l'option `--template`
+Aucun fichier à fournir : le set est assemblé à partir des fragments de `templates/` (piste MIDI avec
+Sampler, piste de groupe, Simpler, réglages du set), tels que Live les enregistre. Un set personnel
+enregistré par Live peut les remplacer avec l'option `--template` (ou en 2e argument de `xm2live.py`).
 
 ## 🚀 Installation
 
@@ -105,7 +103,7 @@ python3 xm2live.py mon_fichier.xm --pan-automation --sample-offset
 - **Automation Sample Start :** Crée des automations pour varier le point de départ du sample
 - **Usage typique :** Sons acid, variations percussives, sons évolutifs
 - **LIMITATION :** Simpler ne supporte pas les loops ping-pong (conversion automatique en forward)
-- **Template requis :** `simpler_template.xml` doit être présent dans le répertoire du script
+- **Simpler :** fragment `templates/simpler.xml`
 - Désactivé par défaut
 
 **⚠️ Option `--envelope` (EXPÉRIMENTAL) :**
@@ -238,8 +236,11 @@ xm2live/
 ├── xm2live.py                   # Script principal de conversion
 ├── xm_parser.py                 # Parser FastTracker 2 XM
 ├── mod_parser.py                # Parser Amiga ProTracker MOD
+├── replayer.py                  # Moteur de lecture (déroulé, tempo, longueur des notes)
+├── live_set.py                  # Assemblage du set Live à partir des fragments
+├── als_validator.py             # Vérification du set produit
 ├── batch_convert.py             # Conversion batch
-└── template_100_tracks.als      # Template Ableton (à créer)
+└── templates/                   # Fragments du set Live (enregistrés par Live)
 ```
 
 ## ⚙️ Configuration
@@ -247,19 +248,16 @@ xm2live/
 ### Variables d'environnement
 Aucune variable d'environnement requise.
 
-### Chemins par défaut
-Le script cherche le template dans cet ordre :
-1. Argument de ligne de commande (`--template`)
-2. À côté du script : `./template_100_tracks.als`
-3. Répertoire courant : `./template_100_tracks.als`
+### Fragments du set
+Les fragments de `templates/` viennent d'un set enregistré par Live. À chaque nouvelle version de
+Live : convertir DISCOTEC.XM avec `--sample-offset`, ouvrir le set dans Live, l'enregistrer, puis
+`python3 tools/extract_fragments.py chemin/DISCOTEC.als` (cf. tools/README.md).
 
 ## 🐛 Dépannage
 
-### Problème : "Template non trouvé"
-**Solution :** Créez un template Ableton avec 100 pistes MIDI (Sampler), ou spécifiez le chemin :
-```bash
-python3 xm2live.py fichier.xm /path/to/template.als
-```
+### Problème : "No such file … templates/liveset.xml"
+**Solution :** le dossier `templates/` doit rester à côté de `xm2live.py` (il fait partie du dépôt
+et de l'app).
 
 ### Problème : "KeyError: 'tempo'"
 **Solution :** Fichier XM corrompu ou format non standard. Vérifiez avec un éditeur XM.
@@ -276,7 +274,7 @@ python3 xm2live.py fichier.xm /path/to/template.als
 ## 📝 Limitations connues
 
 - ❌ **Effets** : La plupart des effets tracker (vibrato, arpeggio, etc.) ne sont pas convertis
-  - ✅ Exception : Effet 8xx (panning) supporté avec `--pan-automation`
+  - ✅ Exception : panoramique (8xx, colonne volume Cx/Dx/Ex, Pxy) converti
   - ✅ Exception : Effet 9xx (sample offset) supporté avec `--sample-offset` via Simpler (limitation: ping-pong→forward)
 - ⚠️ **Enveloppes de volume** : Support expérimental avec `--envelope`
   - Conversion FT2 multi-points → Ableton ADSR est une approximation
@@ -284,7 +282,7 @@ python3 xm2live.py fichier.xm /path/to/template.als
   - Trigger vs Gate : comportements différents entre FT2 et Ableton
   - Résultat approximatif, ajustements manuels recommandés
 - ✅ **Volume** : Volume par défaut des samples + vélocité MIDI par note (supporté)
-- ✅ **Panning** : Panning par défaut supporté, automations optionnelles avec `--pan-automation`
+- ✅ **Panning** : panoramique de chaque canal (fixe par piste, automation avec `--pan-automation`) ; enveloppes de panoramique non converties
 - ❌ **Formats S3M/IT** : Non supportés (uniquement XM et MOD)
 - ⚠️ **Effets F dynamiques** : Seuls les effets F des premiers patterns sont détectés
 
@@ -311,7 +309,6 @@ Code créé avec l'assistance de Claude (Anthropic).
 ## 🙏 Remerciements
 
 - **FastTracker 2** par Triton/Starbreeze (nostalgie des années 90 !)
-- **Bibliothèque buildable** pour la manipulation des fichiers .als
 - **Format XM/MOD** pour la documentation communautaire
 
 ## 📞 Support

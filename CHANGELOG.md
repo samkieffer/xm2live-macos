@@ -2,6 +2,46 @@
 
 Historique des versions et modifications du projet.
 
+## [2.13.0] - 2026-10-30
+
+Lot 3 de AUDIT.md : construction du set Ableton.
+
+### Modifié
+- 🧩 **Set assemblé à partir de fragments enregistrés par Live** (`templates/` : `liveset.xml`,
+  `midi_track.xml`, `group_track.xml`, `simpler.xml`), lisibles et comparables dans git, régénérables
+  avec `tools/extract_fragments.py` à chaque version de Live. `live_set.py` les copie et écrit le set
+  en une fois avec gzip et lxml : **`buildable` n'est plus nécessaire**, plus de fichier temporaire
+  par conversion, plus de second passage pour les automations Sample Start.
+- 📁 Les **pistes de groupe** viennent d'un groupe enregistré par Live (295 éléments) au lieu des
+  ~30 éléments écrits à la main.
+- 🔢 **Identifiants** : seuls ceux que Live garde uniques dans le set sont renumérotés (cibles
+  d'automation et de modulation, Pointee, ControllerTargets, pistes) ; les index locaux restent comme
+  Live les écrit. Chaque note a un **`NoteId`** unique dans son clip (tous valaient 0).
+- ⚡ Conversion plus rapide : 0,53 s au lieu de 0,77 s pour DISCOTEC.
+
+### Corrigé
+- 🎧 **Panoramique** (signalé sur DISCOTEC : les deux pistes Baxs jouaient du même côté). Le
+  panoramique suit désormais l'état du canal comme dans FT2 : un numéro d'instrument le remet au défaut
+  du sample, la colonne volume `Cx` (ignorée jusqu'ici, 15 900 cases dans 68 XM) et `8xx` le fixent
+  jusqu'au numéro d'instrument suivant, `Dx`/`Ex` et `Pxy` le font glisser. Une piste au panoramique
+  constant le reçoit sur la zone du Sampler, même sans `--pan-automation` ; une piste au panoramique
+  variable reçoit une automation en escalier du mixer, zone au centre (avant : défaut du sample sur la
+  zone plus 8xx sur le mixer, qui ne pouvait pas ramener à gauche un son placé à droite). Vérifié note
+  par note contre libopenmpt (DISCOTEC, BDTN, MEC-pan).
+- 🏷️ Les pistes gardent leur nom dans Live (« Ch10 - Ramada.wav ») : seul `EffectiveName` était
+  écrit, et Live renommait la piste d'après son sample (« 10 05 Ramada »).
+- 🎚️ Sur une piste Simpler, l'automation Sample Start effaçait l'automation de panoramique (8xx).
+- 🗂️ `batch_convert.py` n'exige plus `template_100_tracks.als` (au-delà de 100 pistes, il échouait).
+- 🧹 Le Simpler ne référence plus un fichier de ta bibliothèque de samples.
+
+### Supprimé
+- `minimal_template.py`, `create_template_200.py`, `template_100_tracks.als`, `template_200_tracks.als`,
+  `simpler_template.xml` (remplacé par `templates/simpler.xml`) et le code de clonage associé.
+
+### Vérification
+- `als_validator.py` contrôle aussi les `NoteId` (uniques, sous le compteur du clip), un emplacement de
+  clip par scène, et compte `ControllerTargets.N` parmi les identifiants globaux.
+
 ## [2.12.1] - 2026-10-30
 
 ### Corrigé

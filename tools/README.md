@@ -45,6 +45,18 @@ jouent 64 lignes vides, OpenMPT saute l'ordre (FRONT.XM : 46 s dans FT2).
 `openmpt123 --info` n'est pas une bonne référence : sa durée inclut les ordres jamais atteints
 (BAM_BAM.XM : 249,6 s annoncées pour 224,0 s réellement jouées).
 
+## Fragments du set Live : `extract_fragments.py`
+
+Le set est assemblé à partir des fragments de `templates/` (`../live_set.py`). À chaque nouvelle
+version de Live, les régénérer depuis un set enregistré par cette version :
+
+1. `python3 xm2live.py "/chemin/DISCOTEC.XM" --sample-offset --output /tmp/ref` (groupes et Simpler)
+2. ouvrir `/tmp/ref/DISCOTEC.als` dans Live et l'enregistrer ;
+3. `python3 tools/extract_fragments.py /tmp/ref/DISCOTEC.als`, puis `python3 tools/snapshot.py diff`.
+
+Seuls les fragments présents dans le set sont remplacés (`--only` pour en choisir). Ils sont nettoyés :
+ni nom, ni chemin de sample, ni note, ni automation.
+
 ## Validation : `../als_validator.py`
 
 Lancé automatiquement à la fin de chaque conversion, et utilisable seul :

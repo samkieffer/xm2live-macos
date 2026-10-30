@@ -6,7 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.12.1 — single source: `__version__` in xm2live.py, read by the app build scripts)
+**Status:** Production-ready (Version 2.13.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+
+**v2.13.0 (2026-10-30):** the .als is assembled from fragments saved by Live (`templates/`,
+`live_set.py`), lot 3 of AUDIT.md: no more buildable or 100/200-track templates, IDs renumbered only
+where they must be unique, unique NoteIds, track names kept in Live (UserName), written in one pass.
 
 **v2.12.1 (2026-10-30):** an order pointing to a missing pattern plays 64 empty rows, as in FT2
 (28 XM files; FRONT.XM lasts 46 s in FT2).
@@ -39,8 +43,8 @@ python3 xm2live.py path/to/file.xm
 # Convert MOD file
 python3 xm2live.py path/to/file.mod
 
-# With custom template
-python3 xm2live.py file.xm /path/to/template.als
+# With a personal set saved by Live (replaces the fragments it contains, see live_set.py)
+python3 xm2live.py file.xm /path/to/set.als
 
 # With panning automations (effect 8xx)
 python3 xm2live.py file.xm --pan-automation
@@ -72,7 +76,7 @@ python3 batch_convert.py /path/to/modules --sample-offset
 # Install dependencies
 pip install -r requirements.txt
 
-# Dependencies: buildable, numpy, lxml
+# Dependencies: numpy, lxml
 
 # Enable the git hooks (once per clone)
 git config core.hooksPath .githooks
@@ -101,6 +105,10 @@ python3 tools/check_timing.py --jobs 8
 
 # Validate any generated set (also runs automatically at the end of each conversion)
 python3 als_validator.py path/to/project.als
+
+# Regenerate templates/ after a new Live version: convert DISCOTEC.XM with --sample-offset,
+# open the set in Live, save it, then
+python3 tools/extract_fragments.py path/to/DISCOTEC.als
 
 # Audio check: reference render with OpenMPT (matches FT2 to 0 ms / 0 cent),
 # then compare with a WAV exported from Live
@@ -190,7 +198,22 @@ info = {
 
 ### Ableton Live XML Manipulation
 
-The project uses the `buildable` library to load/save .als files, but directly manipulates XML elements via `lxml` for precise control:
+`live_set.py` assembles the set with `lxml` and `gzip` only, from fragments saved by Live
+(`templates/`): `liveset.xml` (the set without MIDI/group tracks), `midi_track.xml` (MIDI track with a
+Sampler and an empty arrangement clip), `group_track.xml`, `simpler.xml`. Each track is a copy of a
+fragment (`LiveSetBuilder.add_track()`), inserted before the return tracks; the set is written once.
+
+**IDs (`LiveSetBuilder.renumber()`):** only the IDs Live keeps unique across the set are renumbered
+on each copy: elements ending in `Target` (AutomationTarget, ModulationTarget), `Pointee`,
+`ControllerTargets.N`, plus track Ids (small consecutive numbers). Local indexes (ClipSlot, KeyTrack,
+MidiClip, AutomationEnvelope, FloatEvent, TrackSendHolder) stay as Live writes them. Notes get a
+`NoteId` unique in their clip (1..N) and `NoteIdGenerator/NextId` = N + 1. Each track gets one clip
+slot per scene (`fit_slots()`). Track names go in `UserName` (otherwise Live renames the track after
+its instrument) and `EffectiveName`.
+
+**Fragments:** extracted and cleaned by `tools/extract_fragments.py` (no names, sample paths, notes
+or automations). Current sources: the set and MIDI track from a Live 12.3.2 set, the group track from
+a Live 12.3.2 set, the Simpler from a user example.
 
 **Key XML structures:**
 - `MultiSampler/Player/MultiSampleMap/SampleParts/MultiSamplePart` - Sample configuration
@@ -200,10 +223,6 @@ The project uses the `buildable` library to load/save .als files, but directly m
 - `MainTrack/DeviceChain/Mixer/Tempo` - Tempo (`Manual`) and its automation envelope in
   `MainTrack/AutomationEnvelopes` (step = two FloatEvents at the same time), see `write_tempo()`
 
-**Template requirement:**
-- 100 MIDI tracks with Sampler
-- First track MUST contain a sample (used as template for all other tracks)
-- Located at: `./template_100_tracks.als` or `/Users/sam/Music/Compo/All Compo/Modules/template_100_tracks.als`
 
 ## Critical Implementation Details
 
@@ -309,48 +328,45 @@ ableton_volume = (xm_volume / 64.0) * 0.25
 - Ableton: `VolumeVelScale` (Vol-Vel) set to **35%** (Ableton default)
 - This makes velocity affect volume without saturation
 
-### 8. Panning Support (v2.3)
+### 8. Panning Support (v2.13.0)
 
-**Sample default panning:**
 ```python
 # XM panning: 0-255 (0=left, 128=center, 255=right)
 # Ableton Panorama: -1.0 to +1.0 (0=center)
-ableton_pan = (xm_panning - 128) / 128.0
+ableton_pan = (xm_panning - 128) / 128.0   # pan_to_ableton()
 ```
-Element: `MultiSamplePart > Panorama`
 
-**Per-note panning (effect 8xx) - OPTIONAL:**
-- Activated with `--pan-automation` flag
-- Creates automation on `Mixer > Pan > AutomationTarget`
-- **2 points per note** (plateau to prevent interpolation)
-- **Returns to default** panning when no effect 8xx
-- Point at time 0 with sample's default panning
-- Includes `AutomationTransformViewState` (required by Ableton)
+**Channel panning (replayer.py, XM only, like FT2):** an instrument number resets the channel
+panning to the sample's default; volume column `Cx` (x × 16) and effect `8xx` set it until the next
+instrument number (a note without instrument keeps it); volume column `Dx`/`Ex` and effect `Pxy` slide
+it per tick. Each note gets `pan` (at its start) and `pan_moves` (changes during the note).
 
-Example automation behavior:
-```
-Sample default pan = 128 (center)
-Note with 8FF → Pan jumps to right, stays during note
-Note with 800 → Pan jumps to left, stays during note
-Note without 8xx → Pan returns to center (default)
-```
+**In Live (`track_panning()` in xm2live.py), per track:**
+- constant panning → `MultiSamplePart > Panorama` of the Sampler/Simpler zone, no automation
+- varying panning with `--pan-automation` → zone at center and a stepped automation on
+  `Mixer > Pan` (`create_pan_automation()`: two points at the same time per change). The zone must
+  stay centered: the mixer pan is a balance, it cannot move a sound panned hard in the zone
+- varying panning without the flag → the zone takes the panning heard longest
+
+Checked against libopenmpt's channel VU meters (left/right) on DISCOTEC, BDTN and MEC-pan: every
+note agrees except short notes (meter falloff) and instruments with a panning envelope.
 
 ## Known Limitations (Accepted, Do Not Fix)
 
 - **Effects:** Most effects (vibrato, arpeggio, etc.) are NOT converted - too complex
-  - Exception: Effect 8xx (panning) IS supported with `--pan-automation`
+  - Exception: panning (8xx, volume column Cx/Dx/Ex, Pxy) IS converted (section 8)
   - Exception: Effect 9xx (sample offset) IS supported with `--sample-offset` via Simpler
     - Uses Simpler instead of Sampler (Sample Start is automatable in Simpler)
     - LIMITATION: Simpler doesn't support ping-pong loops (auto-converted to forward)
     - LIMITATION: Multi-sample not supported (loads only first sample)
-    - Template required: `simpler_template.xml` (65KB, included in repository)
+    - Simpler fragment: `templates/simpler.xml`
 - **Volume envelopes (ADSR):** EXPERIMENTAL support with `--envelope` flag
   - **Fundamental incompatibility:** FT2 multi-point envelopes (up to 12 points) cannot be accurately converted to Ableton ADSR (4 parameters)
   - **Trigger vs Gate:** FT2 notes trigger indefinitely (until next note), Ableton notes have explicit duration (interpolated from note spacing)
   - **Result:** Approximation only, especially for envelopes without sustain point
   - **Recommendation:** Musicians should manually adjust envelopes in Ableton after conversion
   - Available with `--envelope` flag (disabled by default)
-- **Panning:** Sample default panning IS supported. Effect 8xx automations available with flag
+- **Panning envelopes (instrument):** not converted (MEC-pan, ESSAI5); the panning stays the channel's
 - **S3M/IT formats:** NOT supported - only XM and MOD
 - **Tone portamento (3xx, 5xx, vol column Fx):** the note is retriggered instead of gliding (lot 4)
 - **Volume changes inside a note:** slides, gates and fades only decide where notes start and end;
@@ -367,10 +383,12 @@ xm2live/
 ├── xm_parser.py        # XM format parser
 ├── mod_parser.py       # MOD format parser
 ├── replayer.py         # Playback engine shared by XM and MOD (flow, ticks, tempo, note length)
+├── live_set.py         # .als assembly from the fragments of templates/ (IDs, gzip)
+├── templates/          # Fragments saved by Live: liveset, midi_track, group_track, simpler
 ├── als_validator.py    # .als consistency checks (run after each conversion)
 ├── batch_convert.py    # Batch conversion script
 ├── tools/              # snapshot.py, check_collection.py, check_timing.py, render_reference.py,
-│                       # compare_renders.py, audit/
+│                       # compare_renders.py, extract_fragments.py, audit/
 ├── AUDIT.md            # Measured state + roadmap (lots 0-4)
 ├── TECHNICAL.md        # Technical details and specifications
 ├── README.md           # User documentation
@@ -431,12 +449,12 @@ else:
     update_sampler_sample()  # Use Sampler (normal)
 
 # Automation creation (after notes)
-create_sample_offset_automation(track, notes, next_id)
+create_sample_offset_automation(track, notes, sample_start_id, sample_length)
 ```
 
 **Key functions:**
 - `detect_effect_9xx_per_instrument()` - Scans the played notes, returns set of instrument numbers with effect 9xx
-- `get_simpler_template()` - Loads simpler_template.xml (65KB), returns ElementTree copy
+- `LiveSetBuilder.copy_fragment('simpler')` - Copy of templates/simpler.xml with renumbered IDs
 - `populate_track_with_simpler()` - Configures Simpler (similar to update_sampler_sample but for Simpler device)
 - `create_sample_offset_automation()` - Creates Sample Start automation with plateau pattern (2 points per note)
 
@@ -460,10 +478,8 @@ create_sample_offset_automation(track, notes, next_id)
 
 **Notes:** `replayer.play_song()` copies the 9xx parameter of each note into `sample_offset_xm`
 
-**Template:**
-- `simpler_template.xml` - 65KB XML file, extracted from user-provided example
-- Must be present in script directory or current directory
-- Contains pre-configured OriginalSimpler with all necessary structure
+**Template:** `templates/simpler.xml` (OriginalSimpler from a user example, cleaned by
+`tools/extract_fragments.py`)
 
 ### 10. Volume 00 Support (v2.5.0)
 
@@ -538,7 +554,8 @@ Test files that demonstrate specific features (the regression set is tools/regre
 
 ## Version History Summary
 
-**v2.12.1 (Current)** - Missing patterns play 64 empty rows (FT2)
+**v2.13.0 (Current)** - Lot 3 of AUDIT.md: .als assembled from Live-saved fragments, buildable removed
+**v2.12.1** - Missing patterns play 64 empty rows (FT2)
 **v2.12.0** - Lot 2 of AUDIT.md: real note length (sample end, envelope, volume, key-off release)
 **v2.11.0** - Lot 1 of AUDIT.md: replayer.py (song flow, Fxx tempo automation, EDx, ECx, key-off)
 **v2.10.0** - Lot 0 of AUDIT.md: tuning/loop fixes, notes without instrument, Cxx, validator, tools

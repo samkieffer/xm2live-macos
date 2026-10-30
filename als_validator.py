@@ -3,29 +3,17 @@
 Vérification de cohérence d'un set Ableton (.als) généré par xm2live
 
 Détecte les erreurs que Live tolère mal ou signale mal : IDs d'automation en double,
-automations orphelines, samples manquants, boucles hors du sample, Detune hors plage, etc.
+NoteId en double, automations orphelines, samples manquants, boucles hors du sample, Detune hors plage, etc.
 
 Usage: python3 als_validator.py projet.als [autre.als ...]
 """
 
 import os
 import sys
-import gzip
 import wave
 from collections import Counter
-from lxml import etree
 
-
-def load_als(als_path):
-    """Charge un .als (XML gzippé) et retourne l'élément racine"""
-    with gzip.open(als_path, 'rb') as f:
-        return etree.fromstring(f.read(), etree.XMLParser(huge_tree=True))
-
-
-def is_global_id_element(elem):
-    """Éléments dont l'Id doit être unique dans tout le set (cibles référencées par PointeeId)"""
-    return isinstance(elem.tag, str) and 'Id' in elem.attrib and (
-        elem.tag.endswith('Target') or elem.tag == 'Pointee')
+from live_set import load_als, is_global_id as is_global_id_element
 
 
 def sample_frames(wav_path):
@@ -70,6 +58,13 @@ def validate_als(als_path):
     duplicate_tracks = [i for i, n in track_ids.items() if n > 1]
     if duplicate_tracks:
         issues.append(('erreur', f"Id de piste en double: {duplicate_tracks[:5]}"))
+
+    scenes = len(live_set.find('Scenes'))
+    for track in tracks:
+        slots = track.find('Slots') if track.tag == 'GroupTrack' else track.find('DeviceChain/MainSequencer/ClipSlotList')
+        if track.tag in ('MidiTrack', 'GroupTrack') and slots is not None and len(slots) != scenes:
+            issues.append(('erreur', f"{track.find('Name/EffectiveName').get('Value')}: {len(slots)} emplacements "
+                                     f"de clip pour {scenes} scènes"))
 
     group_ids = {t.get('Id') for t in tracks if t.tag == 'GroupTrack'}
     for track in tracks:
@@ -126,6 +121,15 @@ def validate_als(als_path):
                 bad_notes += 1
         if bad_notes:
             issues.append(('erreur', f"{name}: {bad_notes} note(s) invalide(s) (durée ≤ 0, temps < 0 ou vélocité hors 0-127)"))
+
+        # NoteId uniques dans chaque clip, sous le compteur du clip (Live 11+)
+        for clip in track.iter('MidiClip'):
+            note_ids = [int(n.get('NoteId', 0)) for n in clip.iter('MidiNoteEvent')]
+            next_id = clip.find('Notes/NoteIdGenerator/NextId')
+            if len(set(note_ids)) < len(note_ids) or 0 in note_ids:
+                issues.append(('erreur', f"{name}: NoteId en double ou nul dans un clip"))
+            elif note_ids and next_id is not None and int(next_id.get('Value')) <= max(note_ids):
+                issues.append(('erreur', f"{name}: NoteIdGenerator ({next_id.get('Value')}) ≤ plus grand NoteId"))
 
     return issues
 

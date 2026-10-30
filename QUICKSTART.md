@@ -6,7 +6,7 @@ Pour reprendre le projet rapidement sans lire toute la documentation.
 
 ```bash
 cd ~/xm2live
-pip install buildable numpy lxml
+pip install numpy lxml
 ```
 
 ## Utilisation en 30 secondes
@@ -25,16 +25,11 @@ python3 batch_convert.py "/Users/sam/Music/Compo/All Compo/Modules"
 
 **C'est tout !** Les fichiers .als seront dans `Conversions Ableton Live/`
 
-## Template Ableton requis
+## Template Ableton
 
-Créez ou placez `template_100_tracks.als` ici :
-- `/Users/sam/xm2live/template_100_tracks.als`
-- OU `/Users/sam/Music/Compo/All Compo/Modules/template_100_tracks.als`
-
-**Contenu du template :**
-- 100 pistes MIDI
-- Chaque piste avec un Sampler
-- La 1ère piste doit contenir un sample (modèle de structure)
+Rien à fournir : le set est assemblé à partir des fragments de `templates/`, enregistrés par Live
+(cf. `tools/extract_fragments.py`). Un set personnel peut les remplacer :
+`python3 xm2live.py fichier.xm /path/to/set.als`
 
 ## Fichiers du projet
 
@@ -44,13 +39,15 @@ xm2live/
 ├── batch_convert.py    # Conversion batch
 ├── xm_parser.py        # Parser XM
 ├── mod_parser.py       # Parser MOD
-└── template_100_tracks.als
+├── replayer.py         # Moteur de lecture
+├── live_set.py         # Assemblage du set Live
+└── templates/          # Fragments du set Live
 ```
 
 ## Problèmes courants
 
-**"Template non trouvé"**
-→ Créez template ou : `python3 xm2live.py fichier.xm /path/to/template.als`
+**"No such file … templates/liveset.xml"**
+→ Le dossier `templates/` doit rester à côté de `xm2live.py`
 
 **BPM incorrect**
 → Automatique depuis effets F, sinon 125 par défaut

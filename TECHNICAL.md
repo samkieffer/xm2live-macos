@@ -26,8 +26,9 @@ xm2live/
 ├── mod_parser.py        # Parser Amiga ProTracker MOD
 ├── replayer.py          # Moteur de lecture : déroulé, tempo, longueur des notes
 ├── als_validator.py     # Vérification du set produit
+├── live_set.py          # Assemblage du set Live (fragments de templates/, identifiants)
 ├── batch_convert.py     # Conversion batch
-└── template_100_tracks.als
+└── templates/           # Fragments enregistrés par Live (liveset, midi_track, group_track, simpler)
 ```
 
 ### Flux de conversion
@@ -43,7 +44,7 @@ xm2live/
         ↓
    [tracks_data: {channel: {instrument: [notes]}}]
         ↓
-   [xm2live.py: populate_tracks]
+   [xm2live.py + live_set.py : pistes copiées des fragments, gzip + lxml]
         ↓
    [Ableton .als + Samples WAV]
 ```
@@ -543,7 +544,6 @@ num_voices.set('Value', '0')  # 0 = 1 voix, 5 = 6 voix
 
 ### Bibliothèques
 
-- **buildable**: https://pypi.org/project/buildable/
 - **numpy**: https://numpy.org/doc/
 - **lxml**: https://lxml.de/
 

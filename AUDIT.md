@@ -37,7 +37,7 @@ Audit du convertisseur (Python) et de l'app Mac, avec des mesures faites sur ta 
 | 9 | Key-off (note 97) ignoré | 61 XM, 1 878 notes | La note tient jusqu'à la note suivante | Faible une fois le n° 2 fait |
 | 10 | Tone portamento (`3xx`, `5xx`, colonne `Fx`) rejoué comme une nouvelle note | 76 XM (11 067 notes), 22 MOD | Ré-attaque au lieu d'un glissé | Moyen (à valider dans Live) |
 | 11 | Glissements de volume (`Axx`, colonne volume) ignorés | 95 XM (32 %), 44 MOD (48 %) | Fade-ins et fade-outs absents | Moyen |
-| 12 | Panoramique de la colonne volume (`Cx`) absent des automations | 68 XM (23 %) | Placement stéréo partiel | Faible |
+| 12 | ✅ (30/10, v2.13.0) Panoramique de la colonne volume (`Cx`) absent des automations | 68 XM (23 %) | Placement stéréo partiel | Faible |
 | 13 | Instruments multi-samples (seul le dernier sample est gardé) | **1 seul fichier** | — | Pas prioritaire |
 
 **Corrigé aujourd'hui :** finetune (76 % des XM, 46 % des MOD ; dont 102 XM au-delà de ±50 cents)
@@ -195,7 +195,7 @@ du morceau d'origine resterait visible dans Live.
 | **0. Filet de sécurité et corrections rapides** ✅ fait le 28/10/2026 (v2.10.0) | snapshot + validateur + rendu OpenMPT ; notes sans instrument (n° 1) ; `Cxx` en vélocité (n° 5) ; dossier `Samples/` ; restaurer `envelope_reader.py` ; hygiène git, versions, docs | Chaque changement suivant sera mesuré. Gros gain pour peu d'effort |
 | **1. Moteur de lecture** ✅ fait le 28/10/2026 (v2.11.0, vérifié ligne par ligne contre libopenmpt : 393/394) | `replayer.py` : `Dxx`/`Bxx`/`E6x`/`EEx`, `Fxx` en automation de tempo, `EDx`, `ECx`, key-off, état des canaux | Socle commun à `EDx` et à la longueur des notes |
 | **2. Longueur des notes** ✅ fait le 28/10/2026 (v2.12.0) | fin naturelle du sample, suppression du plafond de 4 temps (ou option), key-off et fadeout, enveloppes sans sustain | A besoin du temps au tick et des key-off du lot 1 |
-| **3. Template** | fragments extraits d'un set Live, allocateur d'ID, suppression de buildable, `NoteId`, nettoyage des fichiers temporaires | Indépendant ; peut passer avant le lot 1 si tu préfères |
+| **3. Template** ✅ fait le 30/10/2026 (v2.13.0) | fragments extraits d'un set Live, allocateur d'ID, suppression de buildable, `NoteId`, nettoyage des fichiers temporaires | Indépendant ; peut passer avant le lot 1 si tu préfères |
 | **4. Expression** | glissements de volume et panoramique de la colonne volume en automations, tone portamento en glide (à tester dans Live), calibrage de la courbe vélocité → volume (mesure dans Live) | Le plus subjectif ; à faire une fois la base fiable |
 
 Pistes pour plus tard : un clip par pattern et scènes en Session ; instruments multi-samples (un seul fichier concerné).

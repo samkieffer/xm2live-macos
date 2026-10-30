@@ -22,17 +22,12 @@ cp "$BUILD_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
 # Embarque les scripts Python et ressources nécessaires à la conversion.
 echo "==> Copie des scripts Python"
-for f in xm2live.py xm_parser.py mod_parser.py replayer.py als_validator.py batch_convert.py \
-         minimal_template.py create_template_200.py simpler_template.xml \
+for f in xm2live.py xm_parser.py mod_parser.py replayer.py live_set.py als_validator.py batch_convert.py \
          requirements.txt; do
-    if [ -f "$PROJECT_DIR/$f" ]; then
-        cp "$PROJECT_DIR/$f" "$APP/Contents/Resources/xm2live/"
-    fi
+    cp "$PROJECT_DIR/$f" "$APP/Contents/Resources/xm2live/"
 done
-# Templates .als optionnels (la conversion les auto-génère si absents).
-for als in "$PROJECT_DIR"/*.als; do
-    [ -e "$als" ] && cp "$als" "$APP/Contents/Resources/xm2live/" || true
-done
+# Fragments du set Live (templates/*.xml), assemblés à chaque conversion
+cp -R "$PROJECT_DIR/templates" "$APP/Contents/Resources/xm2live/"
 
 # Icône (générée par make_icon.py).
 if [ -f "$HERE/icon/AppIcon.icns" ]; then
