@@ -34,7 +34,7 @@ from minimal_template import get_minimal_template_root
 from als_validator import validate_als, print_report
 
 # Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
-__version__ = '2.12.0'
+__version__ = '2.12.1'
 
 def update_all_ids(element, next_id):
     """

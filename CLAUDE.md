@@ -6,7 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.12.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+**Status:** Production-ready (Version 2.12.1 — single source: `__version__` in xm2live.py, read by the app build scripts)
+
+**v2.12.1 (2026-10-30):** an order pointing to a missing pattern plays 64 empty rows, as in FT2
+(28 XM files; FRONT.XM lasts 46 s in FT2).
 
 **v2.12.0 (2026-10-28):** real note length (lot 2 of AUDIT.md): no 4-beat cap, notes end with
 the sample, the volume envelope, a volume falling to 0 for good (slides included), key-off; the
@@ -247,7 +250,8 @@ current = np.int16(current + data[k])  # ❌ DO NOT USE
 
 `play_song()` walks `pattern_order` like the tracker instead of laying patterns end to end:
 - Flow: Bxx jump (a backward jump = end of song), Dxx break (decimal row), E6x pattern loop
-  (per channel), EEx pattern delay, orders pointing to a missing pattern are skipped (like OpenMPT)
+  (per channel), EEx pattern delay, an order pointing to a missing pattern plays 64 empty rows
+  (FT2, checked on FRONT.XM: 46 s; OpenMPT skips it, so check_timing.py leaves those rows out)
 - Fxx: speed (< 32) or BPM (>= 32) from the row where it appears, written as a tempo automation
 - Time: 1 row = 1/4 beat always, 1 tick = 1/(4 × speed) beat, so Live BPM = BPM × 6 / speed
 - Ticks: EDx delays the whole cell (x >= speed: not played), ECx sets the volume to 0 at tick x,
@@ -349,8 +353,6 @@ Note without 8xx → Pan returns to center (default)
 - **Panning:** Sample default panning IS supported. Effect 8xx automations available with flag
 - **S3M/IT formats:** NOT supported - only XM and MOD
 - **Tone portamento (3xx, 5xx, vol column Fx):** the note is retriggered instead of gliding (lot 4)
-- **Missing patterns:** an order pointing to a pattern absent from the file is skipped (OpenMPT
-  behaviour); FT2 might play 64 empty rows instead - to be confirmed in FT2 (e.g. FRONT.XM)
 - **Volume changes inside a note:** slides, gates and fades only decide where notes start and end;
   the volume shape itself (fade-in, fade-out, gate) is not converted (lot 4, volume automations)
 - **Key-off with an instrument number on the same cell (41 cells in the collection):** treated as a
@@ -536,7 +538,8 @@ Test files that demonstrate specific features (the regression set is tools/regre
 
 ## Version History Summary
 
-**v2.12.0 (Current)** - Lot 2 of AUDIT.md: real note length (sample end, envelope, volume, key-off release)
+**v2.12.1 (Current)** - Missing patterns play 64 empty rows (FT2)
+**v2.12.0** - Lot 2 of AUDIT.md: real note length (sample end, envelope, volume, key-off release)
 **v2.11.0** - Lot 1 of AUDIT.md: replayer.py (song flow, Fxx tempo automation, EDx, ECx, key-off)
 **v2.10.0** - Lot 0 of AUDIT.md: tuning/loop fixes, notes without instrument, Cxx, validator, tools
 **v2.6.0-v2.9.0** - Template-less conversion, --merge-tracks, --output (see git history)

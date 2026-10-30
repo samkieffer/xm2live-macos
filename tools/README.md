@@ -39,7 +39,9 @@ python3 tools/check_timing.py --jobs 8               # toute la collection
 python3 tools/check_timing.py "/chemin/BDTN.XM"      # un module
 ```
 
-État au 28/10/2026 : 393 modules identiques sur 394 (`esfe.xm` n'est pas un module).
+État au 30/10/2026 : 393 modules identiques sur 394 (`esfe.xm` n'est pas un module). Un ordre
+pointant vers un pattern absent du fichier est retiré de la comparaison : FT2 (et `replayer.py`)
+jouent 64 lignes vides, OpenMPT saute l'ordre (FRONT.XM : 46 s dans FT2).
 `openmpt123 --info` n'est pas une bonne référence : sa durée inclut les ordres jamais atteints
 (BAM_BAM.XM : 249,6 s annoncées pour 224,0 s réellement jouées).
 

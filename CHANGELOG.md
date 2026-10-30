@@ -2,6 +2,15 @@
 
 Historique des versions et modifications du projet.
 
+## [2.12.1] - 2026-10-30
+
+### Corrigé
+- ⏱️ Un ordre pointant vers un pattern absent du fichier joue 64 lignes vides, comme FT2, au lieu
+  d'être sauté (comportement d'OpenMPT). Vérifié dans FT2 sur FRONT.XM : 46 s, contre 40 s avant.
+  28 XM concernés, souvent en milieu de morceau : la musique qui suit était avancée.
+- 🎯 `tools/check_timing.py` retire ces lignes de la comparaison, puisque OpenMPT les saute
+  (393 modules sur 394 toujours identiques).
+
 ## [2.12.0] - 2026-10-28
 
 Lot 2 de AUDIT.md : longueur des notes.

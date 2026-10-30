@@ -91,7 +91,10 @@ def replayer_rows(module_path):
         if info is None:
             return None
         song = play_song(patterns, info['pattern_order'], info['tempo'], info['bpm'], 'mod' if is_mod else 'xm')
-        return song['played_rows'], song['duration_seconds']
+        # Un ordre pointant vers un pattern absent : FT2 (et replayer.py) jouent 64 lignes vides,
+        # OpenMPT saute l'ordre. Ces lignes sont retirées de la comparaison
+        rows = [r for r in song['played_rows'] if info['pattern_order'][r[0]] < len(patterns)]
+        return rows, song['duration_seconds']
     except Exception:
         return None
     finally:

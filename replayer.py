@@ -31,6 +31,9 @@ Cell = namedtuple('Cell', 'note instrument volume effect param volume_effect', d
 KEY_OFF = -1
 
 MAX_ROWS = 100000      # garde-fou contre une boucle de patterns sans fin
+# Ordre pointant vers un pattern absent du fichier : FT2 joue 64 lignes vides (FRONT.XM dure 46 s
+# dans FT2), là où OpenMPT saute l'ordre (cf. tools/check_timing.py)
+MISSING_PATTERN_ROWS = 64
 BASE_RATE = 8363       # fréquence des WAV extraits : vitesse de lecture de la note 60 (C-4 XM, C-2 MOD)
 FADEOUT_START = 32768  # FT2 : après un key-off, le fadeout part de 32768 et perd `fadeout` par tick
 
@@ -243,15 +246,14 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
         # un numéro d'instrument seul relance l'enveloppe et fait réentendre le son, comme dans FT2
         set_level(channel, 0, at)
 
+    def pattern_rows(number):
+        """Nombre de lignes d'un pattern ; un pattern absent du fichier vaut 64 lignes vides dans FT2"""
+        return patterns[number]['rows'] if number < len(patterns) else MISSING_PATTERN_ROWS
+
     while order_index < len(pattern_order) and len(played_rows) < MAX_ROWS:
         pattern_number = pattern_order[order_index]
-        if pattern_number >= len(patterns):
-            # Pattern référencé mais absent du fichier : sauté, comme le fait OpenMPT
-            order_index += 1
-            row = 0
-            continue
-        num_rows = patterns[pattern_number]['rows']
-        cells = patterns[pattern_number]['cells']
+        num_rows = pattern_rows(pattern_number)
+        cells = patterns[pattern_number]['cells'] if pattern_number < len(patterns) else []
         row_cells = cells[row] if row < len(cells) else []
 
         # 1. Vitesse et tempo (Fxx) : effectifs dès cette ligne ; délai de pattern (EEx)
@@ -375,10 +377,8 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                 break  # saut en arrière : le morceau reboucle, c'est sa fin
             order_index = jump_order if jump_order is not None else order_index + 1
             row = break_row or 0
-            if order_index < len(pattern_order):
-                target = pattern_order[order_index]
-                if target >= len(patterns) or row >= patterns[target]['rows']:
-                    row = 0
+            if order_index < len(pattern_order) and row >= pattern_rows(pattern_order[order_index]):
+                row = 0
             loop_start.clear()
             loop_count.clear()
         else:
