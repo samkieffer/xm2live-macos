@@ -6,7 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.13.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+**Status:** Production-ready (Version 2.14.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+
+**v2.14.0 (2026-10-31):** expression (lot 4 of AUDIT.md): calibrated velocity, Sampler volume
+automation for volume changes during notes (FT2 volume envelopes in it with `--envelope`, ADSR
+removed), tone portamento as legato notes + Sampler glide; clips no longer cut long last notes.
 
 **v2.13.0 (2026-10-30):** the .als is assembled from fragments saved by Live (`templates/`,
 `live_set.py`), lot 3 of AUDIT.md: no more buildable or 100/200-track templates, IDs renumbered only
@@ -109,6 +113,10 @@ python3 als_validator.py path/to/project.als
 # Regenerate templates/ after a new Live version: convert DISCOTEC.XM with --sample-offset,
 # open the set in Live, save it, then
 python3 tools/extract_fragments.py path/to/DISCOTEC.als
+
+# Live's Sampler response (velocity curve, levels, glide): set to export from Live, then analysis
+python3 tools/live_calibration.py make /tmp/calib
+python3 tools/live_calibration.py measure /tmp/calib/calibration.wav
 
 # Audio check: reference render with OpenMPT (matches FT2 to 0 ms / 0 cent),
 # then compare with a WAV exported from Live
@@ -312,21 +320,35 @@ num_voices.set('Value', '0')  # 0 = 1 voice, 5 = 6 voices
 
 Element name is `NumVoices` (not `Voices`), indexed from 0.
 
-### 7. Volume Support (v2.1-v2.2)
+### 7. Volume (v2.14.0)
 
-**Sample default volume:**
-```python
-# XM volume: 0-64 (64 = 100%)
-# Ableton Volume: 0.0-1.0 (1.0 = 0 dB)
-# With -12 dB headroom to prevent clipping
-ableton_volume = (xm_volume / 64.0) * 0.25
-```
+FT2 plays a sample at the channel volume (0-64, linear amplitude): the sample's default volume on
+each instrument number, then Cxx / volume column / slides / ECx / key-off. `replayer.py` gives each
+note `volume` (at its start; the highest reached for a fade-in) and `volume_moves` (changes during
+the note). In Live (`set_levels()`, `velocity_for()`, `create_volume_automation()` in xm2live.py):
+- zone `MultiSamplePart > Volume` = `ZONE_GAIN` 0.0115 (-38.8 dB), device `VolumeAndPan/Volume` = 0 dB,
+  Vel → Vol (`VolumeVelScale`) = 100 %. Measured: at Vel → Vol 0 % the Sampler has unity gain, and
+  a % adds a × (22.7 dB - 0.4 dB × (127 - velocity)); the zone brings a full-volume note back to the
+  pre-2.14 level (-16.1 dB of the sample: zone -12 dB, device -12 dB, 35 %), which did not clip
+- velocity = the volume at the note start, through Live's measured curve (0.4 dB per velocity step at
+  100 %, linear in dB): `velocity = 127 + 50·log10(v/64)` (64 → 127, 32 → 112, 1 → 37)
+- changes during the note → automation of the device volume (dB relative to the note's start,
+  back to 0 dB at each note, floor -36 dB = the parameter's minimum), only on tracks that need it
+- `--envelope`: the FT2 volume envelope (`replayer.envelope_curve()`: sustain held, loops unrolled)
+  is multiplied into that automation, note by note
 
-**Per-note volume (velocity):**
-- XM volume column (0-64) → MIDI velocity (0-127)
-- Conversion: `velocity = min(127, xm_volume * 2)`
-- Ableton: `VolumeVelScale` (Vol-Vel) set to **35%** (Ableton default)
-- This makes velocity affect volume without saturation
+Measurements: `tools/live_calibration.py` (set to open in Live, export, analysis), 2026-10-31 on Live
+12.4.16. Redo them after a Live update.
+
+### 7b. Tone Portamento (v2.14.0)
+
+A note played with 3xx, 5xy or volume column Fx while the channel sounds does not retrigger: it
+continues the sound (`legato`, same instrument as the playing note; to the same pitch, the note just
+goes on). In Live the previous note overlaps it by `LEGATO_OVERLAP` (1/64 beat, added when writing
+the MIDI notes only) and the Sampler/Simpler glides: `PortamentoMode` = 2 (measured: 2 glides without
+restarting the sample, 1 restarts it, neither glides between separate notes), `PortamentoTime` = the
+track's median slide duration (`glide_ms`: 3xx = xx/16 semitone per tick, Fx = x semitones per tick,
+MOD = Amiga period units per tick).
 
 ### 8. Panning Support (v2.13.0)
 
@@ -360,17 +382,13 @@ note agrees except short notes (meter falloff) and instruments with a panning en
     - LIMITATION: Simpler doesn't support ping-pong loops (auto-converted to forward)
     - LIMITATION: Multi-sample not supported (loads only first sample)
     - Simpler fragment: `templates/simpler.xml`
-- **Volume envelopes (ADSR):** EXPERIMENTAL support with `--envelope` flag
-  - **Fundamental incompatibility:** FT2 multi-point envelopes (up to 12 points) cannot be accurately converted to Ableton ADSR (4 parameters)
-  - **Trigger vs Gate:** FT2 notes trigger indefinitely (until next note), Ableton notes have explicit duration (interpolated from note spacing)
-  - **Result:** Approximation only, especially for envelopes without sustain point
-  - **Recommendation:** Musicians should manually adjust envelopes in Ableton after conversion
-  - Available with `--envelope` flag (disabled by default)
+- **Volume envelopes:** only with `--envelope` (in the volume automation); the part after a key-off
+  is the Sampler release (fadeout), not the envelope's tail
+- **Volume floor:** the device volume stops at -36 dB below the note's start: fades and gates dip to
+  -36 dB, not to silence (a note still ends at its last silence)
 - **Panning envelopes (instrument):** not converted (MEC-pan, ESSAI5); the panning stays the channel's
 - **S3M/IT formats:** NOT supported - only XM and MOD
-- **Tone portamento (3xx, 5xx, vol column Fx):** the note is retriggered instead of gliding (lot 4)
-- **Volume changes inside a note:** slides, gates and fades only decide where notes start and end;
-  the volume shape itself (fade-in, fade-out, gate) is not converted (lot 4, volume automations)
+- **Tone portamento:** one glide time per track (Live has one per device); the slide speed varies in FT2
 - **Key-off with an instrument number on the same cell (41 cells in the collection):** treated as a
   key-off; FT2 might reset the volume instead
 - **Kxx (key-off at tick xx):** not handled (unused in the collection)
@@ -554,7 +572,8 @@ Test files that demonstrate specific features (the regression set is tools/regre
 
 ## Version History Summary
 
-**v2.13.0 (Current)** - Lot 3 of AUDIT.md: .als assembled from Live-saved fragments, buildable removed
+**v2.14.0 (Current)** - Lot 4 of AUDIT.md: calibrated velocity, volume automation, envelopes, tone portamento glide
+**v2.13.0** - Lot 3 of AUDIT.md: .als assembled from Live-saved fragments, buildable removed
 **v2.12.1** - Missing patterns play 64 empty rows (FT2)
 **v2.12.0** - Lot 2 of AUDIT.md: real note length (sample end, envelope, volume, key-off release)
 **v2.11.0** - Lot 1 of AUDIT.md: replayer.py (song flow, Fxx tempo automation, EDx, ECx, key-off)

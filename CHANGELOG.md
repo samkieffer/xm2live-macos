@@ -2,6 +2,35 @@
 
 Historique des versions et modifications du projet.
 
+## [2.14.0] - 2026-10-31
+
+Lot 4 de AUDIT.md : expression.
+
+### Ajouté
+- 🔊 **Automation du volume du Sampler** pour les changements de volume pendant les notes : `Cxx` et
+  colonne volume sans note, glissements, volume haché, fondus d'entrée (226 XM sur 303 et 71 MOD sur 91
+  en ont). L'automation part de 0 dB à chaque note et descend au plus à -36 dB (minimum du paramètre).
+  Le mixer reste libre.
+- 🎛️ **`--envelope`** (option « Enveloppes » de l'app) met désormais la **forme exacte** de l'enveloppe
+  de volume FT2 dans cette automation (sustain tenu, boucles déroulées), au lieu de l'approximation ADSR.
+- 🎢 **Tone portamento** (`3xx`, `5xy`, colonne volume `Fx`) : la note ne redémarre plus le sample, elle
+  prolonge le son précédent qui glisse vers sa hauteur (notes en legato et glide du Sampler, durée de
+  glissement typique de la piste). 75 XM concernés.
+- 🧪 `tools/live_calibration.py` : set de mesure à exporter depuis Live, puis analyse (courbe
+  vélocité → volume, niveaux, glide).
+
+### Modifié
+- 🎚️ **Vélocité calibrée** sur la réponse mesurée du Sampler (Vel → Vol à 100 %, 0,4 dB par pas) :
+  `vélocité = 127 + 50·log10(volume/64)`. Le volume par défaut du sample passe dans la vélocité ; la
+  zone porte une marge fixe (-38,8 dB) qui garde le niveau d'avant à volume plein (Vel → Vol à 100 %
+  ajoute jusqu'à +22,7 dB, contre +7,9 dB à 35 % : sans cette marge, tout saturait). Avant, `2 × volume`
+  à 35 % plaçait le volume 1 à -17,5 dB au lieu de -36 dB et comprimait toute la dynamique.
+
+### Corrigé
+- ✂️ **Les clips coupaient la dernière note de chaque piste** au-delà de 4 temps (fin du clip calculée
+  comme « dernière note + 4 temps », héritage du plafond supprimé en v2.12). Le validateur le vérifie
+  désormais, ainsi que l'ordre des points d'automation.
+
 ## [2.13.0] - 2026-10-30
 
 Lot 3 de AUDIT.md : construction du set Ableton.

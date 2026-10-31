@@ -24,7 +24,7 @@ from xm_parser import extract_samples_and_patterns as extract_xm
 from mod_parser import extract_samples_and_patterns as extract_mod
 
 # Moteur de lecture commun (ordre de lecture, ticks, tempo)
-from replayer import play_song
+from replayer import play_song, envelope_curve
 
 # Assemblage du set Live à partir des fragments de templates/
 from live_set import LiveSetBuilder, set_value
@@ -33,7 +33,7 @@ from live_set import LiveSetBuilder, set_value
 from als_validator import validate_als, print_report
 
 # Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
-__version__ = '2.13.0'
+__version__ = '2.14.0'
 
 def update_track_name(track, new_name):
     """Nom d'une piste : UserName (nom donné par l'utilisateur) et EffectiveName (nom affiché).
@@ -45,6 +45,36 @@ def update_track_color(track, color_index):
     """Change la couleur d'une piste et de son clip MIDI"""
     set_value(track, 'Color', color_index)
     set_value(track, 'DeviceChain/MainSequencer/ClipTimeable/ArrangerAutomation/Events/MidiClip/Color', color_index)
+
+# Niveaux dans Live. FT2 joue un sample au volume du canal (0-64, linéaire). Dans Live :
+# - la vélocité donne le volume du canal au début de la note (Vel → Vol à 100 %, velocity_for).
+#   Mesuré (tools/live_calibration.py) : à Vel → Vol 0 % le Sampler est à gain 1, et le réglage
+#   ajoute jusqu'à +22,7 dB à la vélocité 127 (à 100 % : +22,7 dB à 127, 0,4 dB de moins par pas) ;
+# - la zone compense : -38,8 dB, pour le même niveau qu'avant la v2.14 à volume plein (zone -12 dB,
+#   device -12 dB, Vel → Vol 35 % : -16,1 dB du sample), qui ne saturait pas (DISCOTEC : crête 0,77) ;
+# - le volume du device (dB) reste à 0 dB et porte l'automation des changements pendant la note
+#   (create_volume_automation), jusqu'à -36 dB, son minimum.
+ZONE_GAIN = 0.0115
+DEVICE_VOLUME_DB = 0.0
+DEVICE_VOLUME_MIN_DB = -36.0
+
+
+def velocity_for(volume):
+    """Vélocité MIDI pour un volume FT2 (1-64, linéaire)
+
+    Mesuré dans Live 12.4 (tools/live_calibration.py) : à Vel → Vol 100 %, le Sampler applique
+    0,4 dB par pas de vélocité (1 = 50,4 dB sous 127). Pour retrouver 20·log10(v/64) dB :
+    vélocité = 127 + 50·log10(v/64), soit 64 → 127, 32 → 112, 16 → 97, 1 → 37.
+    """
+    return max(1, min(127, round(127 + 50 * math.log10(max(volume, 0.01) / 64.0))))
+
+
+def set_levels(device, sample_part):
+    """Niveaux du Sampler / Simpler : zone à ZONE_GAIN, device à 0 dB, vélocité → volume à 100 %"""
+    set_value(sample_part, 'Volume', ZONE_GAIN)
+    set_value(device, 'VolumeAndPan/Volume/Manual', DEVICE_VOLUME_DB)
+    set_value(device, 'VolumeAndPan/VolumeVelScale/Manual', 1.0)
+
 
 def finetune_to_root_key_and_detune(relative_note, finetune):
     """Convertit relative_note + finetune XM en (RootKey, Detune) Ableton
@@ -68,16 +98,14 @@ def finetune_to_root_key_and_detune(relative_note, finetune):
     return root_key, detune
 
 
-def update_sampler_sample(track, sample_info, project_dir, template_sample_part, bpm=125, speed=6, enable_envelope=False, panning=None):
+def update_sampler_sample(track, sample_info, project_dir, template_sample_part, bpm=125, panning=None):
     """Change le sample chargé dans le Sampler/MultiSampler en copiant la structure du template
 
     Args:
         sample_info: Dict contenant path, relative_note, loop_start, loop_length, loop_type, volume, envelope
         project_dir: Répertoire du projet
         template_sample_part: Template du sample part
-        bpm: BPM du module (pour conversion temps enveloppe)
-        speed: Speed du module (ticks par row)
-        enable_envelope: Activer la conversion enveloppe FT2 → ADSR
+        bpm: BPM du module (release en ms, cf. configure_release)
         panning: panoramique de la zone (XM 0-255), par défaut celui du sample
     """
 
@@ -178,32 +206,8 @@ def update_sampler_sample(track, sample_info, project_dir, template_sample_part,
         if finetune != 0:
             print(f"    → Detune: {detune_value:+.2f} cents (finetune={finetune:+d})")
 
-    # Mettre à jour Volume (volume par défaut du sample)
-    # XM volume: 0-64 (64 = 100%)
-    # Ableton Volume: 0.0-1.0 (1.0 = 0 dB)
-    # Réduction à 0.25 (-12 dB) pour éviter la saturation avec velocity + Vol-Vel 35%
-    xm_volume = sample_info.get('volume', 64)
-    volume_elem = new_sample_part.find('.//Volume')
-    if volume_elem is not None:
-        # Conversion linéaire avec réduction de -12dB
-        ableton_volume = (xm_volume / 64.0) * 0.25
-        volume_elem.set('Value', str(ableton_volume))
-
-        # Afficher seulement si différent du maximum
-        if xm_volume != 64:
-            # Calculer les dB pour l'affichage
-            if ableton_volume > 0:
-                db_value = 20 * math.log10(ableton_volume)
-                print(f"    → Volume: {ableton_volume:.3f} ({db_value:.1f} dB, XM={xm_volume}/64)")
-            else:
-                print(f"    → Volume: 0.000 (-∞ dB, XM={xm_volume}/64)")
-
-    # Configurer VolumeVelScale (Vol<Vel) à 35% pour que la velocity affecte le volume
-    # Cela permet aux variations de volume des notes (velocity) d'influencer le volume final
-    # 35% est la valeur par défaut d'Ableton Simpler/Sampler
-    vel_scale = sampler.find('.//VolumeAndPan/VolumeVelScale/Manual')
-    if vel_scale is not None:
-        vel_scale.set('Value', '0.35')
+    # Niveaux (cf. set_levels) : le volume du sample est porté par la vélocité des notes
+    set_levels(sampler, new_sample_part)
 
     # Mettre à jour Panorama (panoramique de la piste, cf. track_panning)
     # XM panning: 0-255 (0=gauche, 128=centre, 255=droite)
@@ -287,11 +291,6 @@ def update_sampler_sample(track, sample_info, project_dir, template_sample_part,
         num_voices.set('Value', '0')  # 0 = 1 voix
         print(f"    → Voix: 1 (monophonique)")
 
-    # Configurer l'enveloppe ADSR si activé
-    if enable_envelope:
-        envelope_info = sample_info.get('envelope')
-        if envelope_info and envelope_info.get('enabled'):
-            configure_envelope_adsr(sampler, envelope_info, bpm, speed)
     configure_release(sampler, sample_info, bpm)
 
     return True
@@ -317,7 +316,7 @@ def detect_effect_9xx_per_instrument(tracks_data):
     }
 
 
-def populate_track_with_simpler(track, sample_info, project_dir, builder, bpm=125, speed=6, enable_envelope=False, panning=None):
+def populate_track_with_simpler(track, sample_info, project_dir, builder, bpm=125, panning=None):
     """Configure une piste avec OriginalSimpler au lieu de MultiSampler
 
     Utilisé pour les instruments qui ont l'effet 9xx (Sample Offset)
@@ -328,9 +327,7 @@ def populate_track_with_simpler(track, sample_info, project_dir, builder, bpm=12
         sample_info: Dict contenant path, relative_note, loop_start, loop_length, loop_type, volume, panning, envelope
         project_dir: Répertoire du projet
         builder: LiveSetBuilder (fournit une copie de templates/simpler.xml)
-        bpm: BPM du module (pour conversion temps enveloppe)
-        speed: Speed du module (ticks par row)
-        enable_envelope: Activer la conversion enveloppe FT2 → ADSR
+        bpm: BPM du module (release en ms, cf. configure_release)
         panning: panoramique de la zone (XM 0-255), par défaut celui du sample
 
     Returns:
@@ -437,24 +434,8 @@ def populate_track_with_simpler(track, sample_info, project_dir, builder, bpm=12
             else:
                 print(f"    → Panorama: {ableton_pan:.2f} (droite, XM={xm_panning}/255)")
 
-    # Mettre à jour Volume du sample dans MultiSamplePart
-    # (pas le Volume global du Simpler, qui est à -12dB dans le template)
-    xm_volume = sample_info.get('volume', 64)
-    volume_elem = sample_part.find('.//Volume')
-    if volume_elem is not None:
-        # Conversion linéaire avec réduction de -12dB
-        ableton_volume = (xm_volume / 64.0) * 0.25
-        volume_elem.set('Value', str(ableton_volume))
-
-        if xm_volume != 64:
-            if ableton_volume > 0:
-                db_value = 20 * math.log10(ableton_volume)
-                print(f"    → Volume: {ableton_volume:.3f} ({db_value:.1f} dB, XM={xm_volume}/64)")
-            else:
-                print(f"    → Volume: 0.000 (-∞ dB, XM={xm_volume}/64)")
-
-    # VolumeVelScale est déjà à 35% dans le template (0.349999994)
-    # Pas besoin de le modifier
+    # Niveaux (cf. set_levels) : le volume du sample est porté par la vélocité des notes
+    set_levels(simpler, sample_part)
 
     # Lire la longueur du sample WAV pour configurer les loops
     if os.path.exists(sample_path):
@@ -533,13 +514,6 @@ def populate_track_with_simpler(track, sample_info, project_dir, builder, bpm=12
         num_voices.set('Value', '0')  # 0 = 1 voix
         print(f"    → Voix: 1 (monophonique)")
 
-    # Configurer l'enveloppe ADSR si activé
-    if enable_envelope:
-        envelope_info = sample_info.get('envelope')
-        if envelope_info and envelope_info.get('enabled'):
-            # Note: configure_envelope_adsr() supporte déjà Simpler
-            # Car il cherche VolumeAndPan/Envelope qui existe dans les deux devices
-            configure_envelope_adsr(simpler, envelope_info, bpm, speed)
     configure_release(simpler, sample_info, bpm)
 
     print(f"    ✅ Simpler configuré (effet 9xx supporté)")
@@ -575,7 +549,9 @@ def update_midi_clip_notes(track, notes):
     if not notes:
         return True
 
-    max_time = max(note['time'] for note in notes) + 4.0
+    # Le clip va jusqu'à la fin de sa dernière note (arrondie au temps) : Live coupe les notes au
+    # bout du clip, et une note peut tenir bien plus que 4 temps depuis la v2.12
+    max_time = math.ceil(max(note['time'] + note['duration'] for note in notes) + LEGATO_OVERLAP)
 
     # Mettre à jour CurrentEnd et LoopEnd
     current_end = midi_clip.find('.//CurrentEnd')
@@ -600,6 +576,14 @@ def update_midi_clip_notes(track, notes):
     for key_track in list(key_tracks):
         key_tracks.remove(key_track)
 
+    # Tone portamento : la note qui précède une note en legato la chevauche, pour que le glide de
+    # Live glisse sans redémarrer le sample
+    durations = {}
+    ordered = sorted(notes, key=lambda n: n['time'])
+    for note, following in zip(ordered, ordered[1:]):
+        if following.get('legato') and abs(note['time'] + note['duration'] - following['time']) < 1e-6:
+            durations[id(note)] = note['duration'] + LEGATO_OVERLAP
+
     # Grouper les notes par hauteur MIDI
     notes_by_key = defaultdict(list)
     for note in notes:
@@ -618,7 +602,7 @@ def update_midi_clip_notes(track, notes):
         for note in key_notes:
             note_event = ET.SubElement(notes_elem, 'MidiNoteEvent')
             note_event.set('Time', str(note['time']))
-            note_event.set('Duration', str(note['duration']))
+            note_event.set('Duration', str(durations.get(id(note), note['duration'])))
             note_event.set('Velocity', str(int(note['velocity'])))
             note_event.set('OffVelocity', '64')
             note_event.set('NoteId', str(note_id))
@@ -629,6 +613,18 @@ def update_midi_clip_notes(track, notes):
 
     set_value(midi_clip, 'Notes/NoteIdGenerator/NextId', note_id)
     return True
+
+def note_spans(notes):
+    """(note, début, fin) dans l'ordre du temps, la fin bornée au début de la note suivante
+
+    Les points d'une automation doivent rester dans l'ordre du temps ; sur une piste fusionnée
+    (--merge-tracks), deux notes de canaux différents peuvent se chevaucher d'un rien.
+    """
+    ordered = sorted(notes, key=lambda n: n['time'])
+    for note, following in zip(ordered, ordered[1:] + [None]):
+        end = note['time'] + note['duration']
+        yield note, note['time'], min(end, following['time']) if following else end
+
 
 def add_automation_envelope(track, target_id):
     """Ajoute à la piste une enveloppe d'automation vide liée à la cible `target_id`
@@ -668,15 +664,15 @@ def create_sample_offset_automation(track, notes, target_id, sample_length):
     """
     events = add_automation_envelope(track, target_id)
     add_float_event(events, '0.0', '0.0')
-    for note in sorted(notes, key=lambda n: n['time']):
+    for note, start, end in note_spans(notes):
         offset = note.get('sample_offset_xm')
         sample_start = '0.0'
         if offset is not None:
             # 9xx : multiplicateur de 256 octets, soit offset × 128 frames pour un sample 16 bits
             sample_start = (offset * 256 / 2.0) / sample_length if sample_length > 0 else 0.0
             sample_start = max(0.0, min(1.0, sample_start))
-        add_float_event(events, note['time'], sample_start)
-        add_float_event(events, note['time'] + note.get('duration', 1.0), sample_start)
+        add_float_event(events, start, sample_start)
+        add_float_event(events, end, sample_start)
     print(f"    → Automation Sample Start: {len(events)} points")
 
 
@@ -697,6 +693,77 @@ def track_panning(notes):
     return (values.pop() if len(values) == 1 else None), heard.most_common(1)[0][0]
 
 
+def volume_db(gain):
+    """Volume du device (dB) pour un gain relatif au volume de départ de la note"""
+    if gain <= 0:
+        return DEVICE_VOLUME_MIN_DB
+    return max(DEVICE_VOLUME_MIN_DB, min(36.0, DEVICE_VOLUME_DB + 20 * math.log10(gain)))
+
+
+def create_volume_automation(track, notes, envelope=None):
+    """Automation du volume du Sampler / Simpler : ce qui change pendant chaque note
+
+    La vélocité donne le volume du canal au début de la note ; l'automation suit, en dB relatifs, ses
+    changements pendant la note (glissements, Cxx, volume haché, fondu d'entrée) et, si `envelope`
+    est fournie (--envelope), la forme de l'enveloppe de volume FT2. Elle repart de 0 dB à chaque note.
+
+    Returns:
+        True si une automation a été écrite (sinon le volume reste à 0 dB)
+    """
+    if envelope is None and not any(note['volume_moves'] for note in notes):
+        return False
+    target = track.find('DeviceChain/DeviceChain/Devices/*/VolumeAndPan/Volume/AutomationTarget')
+    if target is None:
+        return False
+
+    points = []  # (temps, dB) ; deux points au même instant = marche
+    for note, start, end in note_spans(notes):
+        reference = note['volume']
+        curve = []  # (temps, valeur de l'enveloppe 0-64), reliés par des segments
+        if envelope is not None:
+            ticks = note['duration'] / note['tick']
+            curve = [(start + tick * note['tick'], value) for tick, value in envelope_curve(envelope, ticks)]
+
+        def envelope_at(time):
+            if not curve:
+                return 64.0
+            if time <= curve[0][0]:
+                return curve[0][1]
+            for (t0, v0), (t1, v1) in zip(curve, curve[1:]):
+                if t0 <= time <= t1:
+                    return v1 if t1 == t0 else v0 + (v1 - v0) * (time - t0) / (t1 - t0)
+            return curve[-1][1]
+
+        def value(level, time):
+            return volume_db(level / reference * envelope_at(time) / 64.0)
+
+        level = reference
+        changes = sorted([(t, 'level', v) for t, v in note['volume_moves']] +
+                         [(t, 'envelope', v) for t, v in curve], key=lambda c: c[0])
+        if changes and changes[0][0] <= start and changes[0][1] == 'level':
+            level = changes.pop(0)[2]  # fondu d'entrée : la note part de 0
+        points.append((start, value(level, start)))
+        for time, kind, new in changes:
+            if not start < time < end and kind == 'level':
+                continue
+            if kind == 'level':
+                points.append((time, value(level, time)))
+                level = new
+            points.append((min(time, end), value(level, min(time, end))))
+        points.append((end, value(level, end)))
+
+    events = add_automation_envelope(track, target.get('Id'))
+    add_float_event(events, '0.0', round(points[0][1], 4))  # valeur avant la première note
+    previous = (0.0, points[0][1])
+    for time, db in points:
+        if time == previous[0] and abs(db - previous[1]) < 1e-9:
+            continue
+        add_float_event(events, time, round(db, 4))
+        previous = (time, db)
+    print(f"    → Automation volume: {len(events)} points")
+    return True
+
+
 def create_pan_automation(track, notes):
     """Automation du panoramique de la piste (mixer), en escalier
 
@@ -714,9 +781,9 @@ def create_pan_automation(track, notes):
     events = add_automation_envelope(track, pan_target.get('Id'))
 
     changes = []
-    for note in sorted(notes, key=lambda n: n['time']):
-        changes.append((note['time'], note['pan']))
-        changes.extend(note['pan_moves'])
+    for note, start, end in note_spans(notes):
+        changes.append((start, note['pan']))
+        changes.extend(move for move in note['pan_moves'] if move[0] < end)
     current = changes[0][1]
     add_float_event(events, '0.0', pan_to_ableton(current))
     for time, pan in changes[1:]:
@@ -797,139 +864,23 @@ def write_tempo(live_set_element, tempo_changes):
     return len(tempos) - 1
 
 
-def configure_envelope_adsr(sampler, envelope_info, bpm, speed):
-    """Configure l'enveloppe ADSR du Sampler basée sur l'enveloppe volume FT2
+# Glide du Sampler / Simpler (PortamentoMode) : le mode qui ne glisse que sur des notes qui se
+# chevauchent, sans redémarrer le sample (cf. tools/live_calibration.py). Une note suivie d'une note
+# en tone portamento la chevauche de LEGATO_OVERLAP temps (update_midi_clip_notes)
+GLIDE_MODE = 2  # mesuré : 1 glisse mais redémarre le sample, 2 glisse sans le redémarrer
+LEGATO_OVERLAP = 1 / 64.0
+LIVE_GLIDE_MAX_MS = 10000
 
-    Args:
-        sampler: L'élément MultiSampler Ableton
-        envelope_info: Infos enveloppe FT2 {'enabled', 'points', 'sustain_point', 'sustain_enabled', 'num_points'}
-        bpm: BPM du module (pour conversion temps)
-        speed: Speed du module (ticks par row, défaut 6)
 
-    Returns:
-        True si enveloppe configurée, False sinon
-    """
-
-    # Si enveloppe désactivée ou pas de points, ne rien faire
-    if not envelope_info.get('enabled') or not envelope_info.get('points'):
-        return False
-
-    points = envelope_info['points']
-    num_points = envelope_info['num_points']
-    sustain_enabled = envelope_info.get('sustain_enabled', False)
-    sustain_point = envelope_info.get('sustain_point', 1)
-
-    # Conversion temps FT2 (ticks) → millisecondes
-    # 1 tick = (2500 / bpm) ms à Speed=6
-    tick_to_ms = 2500.0 / bpm
-
-    # Trouver l'enveloppe VOLUME (pas Filter !)
-    # L'enveloppe de volume est dans VolumeAndPan, pas dans SimplerFilter
-    volume_and_pan = sampler.find('.//VolumeAndPan')
-    if volume_and_pan is None:
-        print("    ⚠️  VolumeAndPan non trouvé dans le Sampler")
-        return False
-
-    envelope = volume_and_pan.find('.//Envelope')
-    if envelope is None:
-        print("    ⚠️  Enveloppe Volume non trouvée dans VolumeAndPan")
-        return False
-
-    # Trouver le pic (valeur max)
-    max_val = 0
-    max_idx = 0
-    for i in range(num_points):
-        if points[i][1] > max_val:
-            max_val = points[i][1]
-            max_idx = i
-
-    # === STRATÉGIE SELON LE NOMBRE DE POINTS ===
-
-    if num_points == 2:
-        # Cas A : Enveloppe simple à 2 points (66% des cas)
-        time_0, val_0 = points[0]
-        time_1, val_1 = points[1]
-
-        attack_time = 0.1
-        attack_level = 0.0
-        attack_slope = 0.0
-
-        decay_time = max(1.0, time_1 * tick_to_ms)
-        decay_level = val_0 / 64.0
-        decay_slope = 1.0
-
-        sustain_level = val_1 / 64.0
-
-        release_time = 50.0
-        release_level = 0.0
-        release_slope = 0.0
-
-    elif sustain_enabled and sustain_point < num_points:
-        # Cas B : Enveloppe avec sustain FT2 défini
-        peak_time, peak_val = points[max_idx]
-        sustain_time, sustain_val = points[sustain_point]
-        last_time, last_val = points[num_points - 1]
-
-        attack_time = max(0.1, peak_time * tick_to_ms)
-        attack_level = 0.0
-        attack_slope = 0.0
-
-        decay_time = max(1.0, (sustain_time - peak_time) * tick_to_ms)
-        decay_level = peak_val / 64.0
-        decay_slope = 0.5
-
-        sustain_level = sustain_val / 64.0
-
-        release_time = max(1.0, (last_time - sustain_time) * tick_to_ms)
-        release_level = 0.0
-        release_slope = 0.0
-
-    else:
-        # Cas C : Enveloppe complexe sans sustain
-        peak_time, peak_val = points[max_idx]
-        last_time, last_val = points[num_points - 1]
-
-        mid_idx = (max_idx + num_points - 1) // 2
-        mid_time, mid_val = points[mid_idx]
-
-        attack_time = max(0.1, peak_time * tick_to_ms)
-        attack_level = 0.0
-        attack_slope = 0.0
-
-        decay_time = max(1.0, (mid_time - peak_time) * tick_to_ms)
-        decay_level = peak_val / 64.0
-        decay_slope = 0.5
-
-        sustain_level = mid_val / 64.0
-
-        release_time = max(1.0, (last_time - mid_time) * tick_to_ms)
-        release_level = 0.0
-        release_slope = 0.0
-
-    # === CONFIGURATION DES PARAMÈTRES ABLETON ===
-
-    def set_envelope_param(param_name, value):
-        elem = envelope.find(f'.//{param_name}/Manual')
-        if elem is not None:
-            elem.set('Value', str(value))
-
-    set_envelope_param('AttackTime', attack_time)
-    set_envelope_param('AttackLevel', attack_level)
-    set_envelope_param('AttackSlope', attack_slope)
-
-    set_envelope_param('DecayTime', decay_time)
-    set_envelope_param('DecayLevel', decay_level)
-    set_envelope_param('DecaySlope', decay_slope)
-
-    set_envelope_param('SustainLevel', sustain_level)
-
-    set_envelope_param('ReleaseTime', release_time)
-    set_envelope_param('ReleaseLevel', release_level)
-    set_envelope_param('ReleaseSlope', release_slope)
-
-    print(f"    → Enveloppe ADSR: {num_points} pts FT2 → A={attack_time:.1f}ms D={decay_time:.1f}ms S={sustain_level:.2f} R={release_time:.1f}ms")
-
-    return True
+def configure_glide(device, notes):
+    """Tone portamento : glide du Sampler, durée typique (médiane) des glissements de la piste"""
+    glides = sorted(note['glide_ms'] for note in notes if note.get('legato') and note.get('glide_ms'))
+    if not glides:
+        return
+    glide_ms = max(0.1, min(LIVE_GLIDE_MAX_MS, glides[len(glides) // 2]))
+    set_value(device, 'Globals/PortamentoMode/Manual', GLIDE_MODE)
+    set_value(device, 'Globals/PortamentoTime/Manual', round(glide_ms, 1))
+    print(f"    → Glide: {glide_ms:.0f} ms ({len(glides)} notes en tone portamento)")
 
 
 LIVE_RELEASE_MAX_MS = 60000  # borne du paramètre Release du Sampler et du Simpler
@@ -1045,7 +996,7 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         template_path: set Live personnel dont reprendre les fragments (optionnel, cf. live_set.py)
         output_dir: Répertoire de sortie (optionnel)
         enable_pan_automation: Activer les automations de panning (effet 8xx)
-        enable_envelope: Activer la conversion des enveloppes volume (expérimental)
+        enable_envelope: Enveloppes de volume FT2 dans l'automation de volume
         enable_sample_offset: Activer l'effet 9xx (Sample Offset) avec Simpler
     """
 
@@ -1065,12 +1016,6 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
     print("="*60)
     print(f"CONVERSION {format_name} → ABLETON LIVE")
     print("="*60)
-
-    # Avertissement si enveloppes activées
-    if enable_envelope:
-        print("\n⚠️  MODE EXPÉRIMENTAL: Conversion des enveloppes activée")
-        print("   Les enveloppes FT2 multi-points sont approximées en ADSR Ableton.")
-        print("   Résultat approximatif, ajustements manuels recommandés.\n")
 
     # Préparer les répertoires
     if not output_dir:
@@ -1243,16 +1188,23 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         if use_simpler:
             # Utiliser Simpler (pour effet 9xx)
             sample_start_id = populate_track_with_simpler(track, track_info['sample'], output_dir, builder,
-                                                          bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope,
-                                                          panning=zone_pan)
+                                                          bpm=xm_info['bpm'], panning=zone_pan)
         else:
             # Utiliser Sampler (normal)
             update_sampler_sample(track, track_info['sample'], output_dir, builder.sample_part,
-                                bpm=xm_info['bpm'], speed=xm_info['tempo'], enable_envelope=enable_envelope,
-                                panning=zone_pan)
+                                bpm=xm_info['bpm'], panning=zone_pan)
 
-        # Ajouter les notes MIDI
+        # Tone portamento : notes en legato et glide du Sampler
+        configure_glide(track.find('DeviceChain/DeviceChain/Devices')[0], track_info['notes'])
+
+        # Ajouter les notes MIDI : vélocité = volume du canal au début de la note
+        for note in track_info['notes']:
+            note['velocity'] = velocity_for(note['volume'])
         update_midi_clip_notes(track, track_info['notes'])
+
+        # Automation de volume : changements pendant les notes, enveloppe FT2 avec --envelope
+        envelope = track_info['sample'].get('envelope') if enable_envelope else None
+        create_volume_automation(track, track_info['notes'], envelope if envelope and envelope['enabled'] else None)
 
         # Automation Sample Start (effet 9xx, Simpler)
         if use_simpler and sample_start_id and any(n.get('sample_offset_xm') is not None for n in track_info['notes']):
@@ -1378,9 +1330,8 @@ SWITCHES DISPONIBLES
                     LIMITATION: ping-pong loops → forward
                     Par défaut: désactivé
 
---envelope          Active conversion enveloppes FT2 → ADSR Ableton
-                    Conversion approximative (12 points → 4 ADSR)
-                    EXPÉRIMENTAL - ajustements manuels recommandés
+--envelope          Ajoute les enveloppes de volume FT2 à l'automation de
+                    volume du Sampler (forme exacte, note par note)
                     Par défaut: désactivé
 
 --merge-tracks      Crée une piste de référence "ALL" par instrument
@@ -1412,8 +1363,8 @@ Documentation complète: README.md
                         help='Activer les automations de panning (effet 8xx). '
                              'Par défaut désactivé car rare dans les modules.')
     parser.add_argument('--envelope', action='store_true',
-                        help='Activer la conversion des enveloppes volume FT2 → ADSR Ableton. '
-                             'Par défaut désactivé car approximation simplifiée.')
+                        help='Ajouter les enveloppes de volume FT2 à l\'automation de volume du Sampler '
+                             '(forme exacte, note par note).')
     parser.add_argument('--sample-offset', action='store_true',
                         help='Activer l\'effet 9xx (Sample Offset) avec Simpler. '
                              'Les instruments avec effet 9xx utiliseront Simpler au lieu de Sampler. '

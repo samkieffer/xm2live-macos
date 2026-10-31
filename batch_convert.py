@@ -61,7 +61,7 @@ def batch_convert(directory, template_path=None, recursive=True, enable_pan_auto
         template_path: Chemin vers le template Ableton (optionnel)
         recursive: Si True, recherche dans les sous-répertoires
         enable_pan_automation: Activer les automations de panning (effet 8xx)
-        enable_envelope: Activer la conversion des enveloppes (expérimental)
+        enable_envelope: Enveloppes de volume FT2 dans l'automation de volume
     """
 
     print("="*70)
@@ -268,7 +268,7 @@ Exemples:
     parser.add_argument(
         '--envelope',
         action='store_true',
-        help='Activer la conversion des enveloppes volume FT2 → ADSR. Par défaut désactivé car approximation.'
+        help='Ajouter les enveloppes de volume FT2 à l\'automation de volume du Sampler.'
     )
 
     parser.add_argument(

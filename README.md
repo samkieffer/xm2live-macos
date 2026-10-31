@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.13.0** (support XM + MOD + Volume + Panning + Sample Offset + Volume 00 + Enveloppes expérimentales ; voir CHANGELOG.md et AUDIT.md)
+**Version actuelle : 2.14.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes + Portamento ; voir CHANGELOG.md et AUDIT.md)
 
 ## 🎵 Fonctionnalités
 
@@ -15,11 +15,12 @@ Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MO
 - 🎚️ **Samples** - Export en WAV 16-bit avec préservation des loops
 - 🔁 **Loops** - Support Forward et Ping-Pong (XM uniquement)
 - ⏱️ **Tempo** - Calcul automatique du BPM réel à partir de Speed et BPM
-- 🔊 **Volume** - Volume par défaut des samples + vélocité MIDI par note (headroom -12dB)
+- 🔊 **Volume** - Vélocité calibrée sur le Sampler de Live (volume au début de la note) + automation du volume du Sampler pour les changements pendant la note (glissements, Cxx, volume haché)
 - 🎧 **Panning** - Panoramique de chaque canal comme dans FT2 (défaut du sample, 8xx, colonne volume Cx, glissements) : fixe par piste, ou automation avec `--pan-automation`
 - 🎚️ **Sample Offset** - Effet 9xx supporté via Simpler (avec `--sample-offset`, limitation ping-pong→forward)
 - 🔇 **Volume 00 (Note Stop)** - Les volumes 00 raccourcissent automatiquement les notes (XM + MOD effet C00)
-- 🎛️ **Enveloppes** - Conversion expérimentale FT2 → ADSR Ableton (avec `--envelope`, approximation)
+- 🎛️ **Enveloppes** - Forme exacte des enveloppes de volume FT2 dans l'automation de volume (avec `--envelope`)
+- 🎢 **Tone portamento** - Notes en legato et glide du Sampler, sans redémarrer le sample
 - 🎨 **Organisation** - Groupes par instrument, couleurs par canal
 - 🔊 **Monophonie** - 1 voix par sampler (comportement tracker)
 - 📁 **Structure** - Projets organisés dans "Conversions Ableton Live/"
@@ -90,7 +91,7 @@ python3 xm2live.py mon_fichier.xm --pan-automation
 # Activer l'effet 9xx (Sample Offset) via Simpler
 python3 xm2live.py mon_fichier.xm --sample-offset
 
-# Activer la conversion expérimentale des enveloppes (ADSR)
+# Ajouter les enveloppes de volume FT2 à l'automation de volume
 python3 xm2live.py mon_fichier.xm --envelope
 
 # Combiner plusieurs options
@@ -106,13 +107,11 @@ python3 xm2live.py mon_fichier.xm --pan-automation --sample-offset
 - **Simpler :** fragment `templates/simpler.xml`
 - Désactivé par défaut
 
-**⚠️ Option `--envelope` (EXPÉRIMENTAL) :**
-- Convertit les enveloppes volume FT2 (multi-points) en ADSR Ableton (4 paramètres)
-- **Incompatibilité fondamentale :** FT2 supporte jusqu'à 12 points, Ableton seulement 4 (Attack/Decay/Sustain/Release)
-- **Trigger vs Gate :** FT2 déclenche les notes indéfiniment, Ableton utilise une durée explicite (interpolée)
-- **Résultat :** Approximation uniquement, surtout pour enveloppes sans point de sustain
-- **Recommandation :** Ajuster manuellement les enveloppes dans Ableton après conversion
-- Désactivé par défaut
+**Option `--envelope` :**
+- Ajoute la forme exacte de l'enveloppe de volume FT2 (points, sustain, boucles) à l'automation du
+  volume du Sampler, note par note
+- Après un key-off, la fin du son (fadeout FT2) reste la release du Sampler
+- Désactivé par défaut (automations plus denses)
 
 ### Conversion batch (multiple fichiers)
 
@@ -276,22 +275,18 @@ et de l'app).
 - ❌ **Effets** : La plupart des effets tracker (vibrato, arpeggio, etc.) ne sont pas convertis
   - ✅ Exception : panoramique (8xx, colonne volume Cx/Dx/Ex, Pxy) converti
   - ✅ Exception : Effet 9xx (sample offset) supporté avec `--sample-offset` via Simpler (limitation: ping-pong→forward)
-- ⚠️ **Enveloppes de volume** : Support expérimental avec `--envelope`
-  - Conversion FT2 multi-points → Ableton ADSR est une approximation
-  - Incompatibilité fondamentale : 12 points FT2 vs 4 paramètres ADSR
-  - Trigger vs Gate : comportements différents entre FT2 et Ableton
-  - Résultat approximatif, ajustements manuels recommandés
-- ✅ **Volume** : Volume par défaut des samples + vélocité MIDI par note (supporté)
+- ✅ **Enveloppes de volume** : forme exacte dans l'automation avec `--envelope`
+- ✅ **Volume** : vélocité calibrée + automation du volume du Sampler (jusqu'à -36 dB, minimum du paramètre)
+- ✅ **Tone portamento** : legato + glide ; une seule durée de glissement par piste
 - ✅ **Panning** : panoramique de chaque canal (fixe par piste, automation avec `--pan-automation`) ; enveloppes de panoramique non converties
 - ❌ **Formats S3M/IT** : Non supportés (uniquement XM et MOD)
-- ⚠️ **Effets F dynamiques** : Seuls les effets F des premiers patterns sont détectés
 
 ## 🔮 Futures améliorations possibles
 
 - [ ] Support format S3M (ScreamTracker 3)
 - [ ] Support format IT (Impulse Tracker)
-- [ ] Conversion des effets basiques (volume slide, portamento, vibrato)
-- [ ] Amélioration conversion enveloppes (actuellement expérimental)
+- [ ] Conversion du vibrato et de l'arpeggio
+- [ ] Enveloppes de panoramique
 - [ ] Interface graphique (GUI)
 - [ ] Mode --force pour reconvertir les fichiers existants
 - [ ] Export des métadonnées (nom module, commentaires)

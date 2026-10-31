@@ -47,10 +47,14 @@ def validate_als(als_path):
         if int(next_pointee.get('Value')) <= max(global_ids):
             issues.append(('erreur', f"NextPointeeId={next_pointee.get('Value')} ≤ plus grand ID ({max(global_ids)})"))
 
-    # 2. Chaque automation pointe vers une cible existante
+    # 2. Chaque automation pointe vers une cible existante, ses points dans l'ordre du temps
     for pointee in root.iter('PointeeId'):
         if int(pointee.get('Value')) not in global_ids:
             issues.append(('erreur', f"Automation orpheline (PointeeId {pointee.get('Value')} introuvable)"))
+    for envelope in root.iter('AutomationEnvelope'):
+        times = [float(event.get('Time')) for event in envelope.iter('FloatEvent')]
+        if any(later < earlier for earlier, later in zip(times, times[1:])):
+            issues.append(('erreur', "Automation dont les points ne sont pas dans l'ordre du temps"))
 
     # 3. Pistes : Id uniques, groupes existants
     tracks = live_set.find('Tracks')
@@ -122,8 +126,13 @@ def validate_als(als_path):
         if bad_notes:
             issues.append(('erreur', f"{name}: {bad_notes} note(s) invalide(s) (durée ≤ 0, temps < 0 ou vélocité hors 0-127)"))
 
-        # NoteId uniques dans chaque clip, sous le compteur du clip (Live 11+)
+        # NoteId uniques dans chaque clip, sous le compteur du clip (Live 11+) ; notes dans le clip
         for clip in track.iter('MidiClip'):
+            clip_end = float(clip.find('CurrentEnd').get('Value'))
+            beyond = sum(1 for n in clip.iter('MidiNoteEvent')
+                         if float(n.get('Time')) + float(n.get('Duration')) > clip_end + 1e-6)
+            if beyond:
+                issues.append(('erreur', f"{name}: {beyond} note(s) au-delà de la fin du clip ({clip_end}), coupée(s) par Live"))
             note_ids = [int(n.get('NoteId', 0)) for n in clip.iter('MidiNoteEvent')]
             next_id = clip.find('Notes/NoteIdGenerator/NextId')
             if len(set(note_ids)) < len(note_ids) or 0 in note_ids:
