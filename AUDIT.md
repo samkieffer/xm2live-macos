@@ -146,8 +146,8 @@ puis procéder en deux temps :
    plus grand ID, samples présents, boucles dans les limites du sample, Detune entre −50 et +50,
    RootKey entre 0 et 127, `NoteId` uniques.
 
-**Idée pour plus tard, côté retravail :** un clip par pattern (nommé « Pattern 0C ») plutôt qu'un seul
-clip par piste, et éventuellement les scènes de la vue Session dans l'ordre des patterns. La structure
+**Idée pour plus tard, côté retravail :** ✅ (v2.15.0, un clip par suite de patterns) un clip par
+pattern (nommé « Pattern 0C ») plutôt qu'un seul clip par piste, et éventuellement les scènes de la vue Session dans l'ordre des patterns. La structure
 du morceau d'origine resterait visible dans Live.
 
 ## 5. Vérification automatique (filet de sécurité)

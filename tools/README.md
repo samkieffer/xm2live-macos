@@ -4,7 +4,8 @@
 
 Convertit les modules de `regression_set.txt` et compare le résultat aux instantanés de
 `snapshots/` : tempo, pistes, samples (empreinte PCM), RootKey et Detune, boucles, enveloppe d'ampli,
-notes (temps, durée, hauteur, vélocité), automations et résultat du validateur.
+notes (temps, durée, hauteur, vélocité), clips (début, fin, nom), automations et résultat du
+validateur.
 
 ```bash
 python3 tools/snapshot.py diff               # tous les modules

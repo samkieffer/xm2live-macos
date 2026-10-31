@@ -6,7 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.14.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+**Status:** Production-ready (Version 2.15.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+
+**v2.15.0 (2026-10-31):** one arrangement clip per run of patterns where a track plays (named after
+the patterns), instead of one clip from bar 1 to the last note.
 
 **v2.14.0 (2026-10-31):** expression (lot 4 of AUDIT.md): calibrated velocity, Sampler volume
 automation for volume changes during notes (FT2 volume envelopes in it with `--envelope`, ADSR
@@ -310,6 +313,17 @@ dropped unless its volume comes back up (fade-in), then it takes the velocity of
 reached. Notes cut on the tick they start (EC0) are dropped. The sample offset (9xx) is not taken
 into account in the length.
 
+### 5b. Clips (v2.15.0)
+
+`replayer.play_song()` returns `segments`: each passage of an order entry, in played order
+(start, end, pattern number). `clip_runs()` in xm2live.py cuts each track into clips: a clip starts at
+the start of the pattern of its first note and ends at the first pattern boundary where nothing sounds
+(a held note extends it: Live cuts notes at the clip end); patterns where the track does not play get
+no clip. Names: `clip_name()` ("Pattern 0C", "Patterns 21-22-21", "Patterns 0C…1F", hex as in FT2).
+Like the clips Live splits, notes keep song time and each clip shows its window: `Time` =
+`CurrentStart` = `Loop/LoopStart` = clip start, `StartRelative` 0, `LoopEnd` = `OutMarker` =
+`CurrentEnd`. The validator checks notes inside their clip window and clips that do not overlap.
+
 ### 6. NumVoices Configuration
 
 ```python
@@ -572,7 +586,8 @@ Test files that demonstrate specific features (the regression set is tools/regre
 
 ## Version History Summary
 
-**v2.14.0 (Current)** - Lot 4 of AUDIT.md: calibrated velocity, volume automation, envelopes, tone portamento glide
+**v2.15.0 (Current)** - One clip per run of patterns
+**v2.14.0** - Lot 4 of AUDIT.md: calibrated velocity, volume automation, envelopes, tone portamento glide
 **v2.13.0** - Lot 3 of AUDIT.md: .als assembled from Live-saved fragments, buildable removed
 **v2.12.1** - Missing patterns play 64 empty rows (FT2)
 **v2.12.0** - Lot 2 of AUDIT.md: real note length (sample end, envelope, volume, key-off release)

@@ -277,7 +277,8 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
         la note, legato et glide_ms (tone portamento : la note prolonge le son de la précédente en
         glissant vers sa hauteur, durée du glissement en ms), sample_offset_xm),
         'tempo_changes' [(temps, BPM Live)],
-        'end_time' (temps), 'duration_seconds', 'released_instruments' (instruments dont un key-off
+        'end_time' (temps), 'segments' [(début, fin, numéro de pattern)] (chaque passage d'un ordre de
+        lecture, dans l'ordre joué), 'duration_seconds', 'released_instruments' (instruments dont un key-off
         lance une release : {instrument: ticks}) et 'played_rows' [(ordre, ligne, speed, bpm)]
         (déroulé ligne par ligne, comparé à OpenMPT par tools/check_timing.py)
     """
@@ -314,6 +315,7 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
     seconds = 0.0
     order_index, row = 0, 0
     played_rows = []
+    segments = []  # passages successifs dans l'ordre de lecture : [début, fin, numéro de pattern]
 
     def set_level(channel, value, at):
         """Volume réel du canal : passer à 0 rend le canal muet, en repartir le fait réentendre"""
@@ -381,6 +383,10 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
         tick = 0.25 / speed
         row_ticks = speed * (1 + pattern_delay)  # EEx répète la ligne (sans rejouer les notes)
         played_rows.append((order_index, row, speed, bpm))
+        if not segments or played_rows[-2][0] != order_index:
+            if segments:
+                segments[-1][1] = time
+            segments.append([time, None, pattern_number])
 
         # 2. Notes, volumes et arrêts de chaque canal, effets de déroulé
         jump_order, break_row, loop_row = None, None, None
@@ -591,6 +597,7 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
         'tracks': tracks,
         'tempo_changes': tempo_changes,
         'end_time': time,
+        'segments': [(start, end if end is not None else time, number) for start, end, number in segments],
         'duration_seconds': seconds,
         'released_instruments': released_instruments,
         'played_rows': played_rows,

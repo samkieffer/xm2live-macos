@@ -2,6 +2,18 @@
 
 Historique des versions et modifications du projet.
 
+## [2.15.0] - 2026-10-31
+
+### Modifié
+- 🧱 **Un clip par suite de patterns** où la piste joue, au lieu d'un seul clip de la mesure 1 à la
+  dernière note : un clip commence au début du pattern de sa première note et s'arrête à la première
+  frontière de pattern où plus rien ne sonne (une note tenue le prolonge). Les patterns où la piste ne
+  joue pas restent vides. Chaque clip porte le nom de ses patterns (« Pattern 0C », « Patterns
+  21-22-21 »). Les notes gardent le temps du morceau (comme un clip découpé dans Live). DISCOTEC : 355
+  clips sur 57 pistes.
+- 🧪 Les instantanés de non-régression enregistrent les clips ; le validateur vérifie que les notes
+  restent dans la fenêtre de leur clip et que les clips d'une piste ne se chevauchent pas.
+
 ## [2.14.0] - 2026-10-31
 
 Lot 4 de AUDIT.md : expression.

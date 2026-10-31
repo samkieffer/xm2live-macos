@@ -14,6 +14,7 @@ try:
 except ImportError:
     import xml.etree.ElementTree as ET
 import copy
+from bisect import bisect_left, bisect_right
 import wave
 import numpy as np
 from pathlib import Path
@@ -33,7 +34,7 @@ from live_set import LiveSetBuilder, set_value
 from als_validator import validate_als, print_report
 
 # Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
-__version__ = '2.14.0'
+__version__ = '2.15.0'
 
 def update_track_name(track, new_name):
     """Nom d'une piste : UserName (nom donné par l'utilisateur) et EffectiveName (nom affiché).
@@ -531,50 +532,68 @@ def populate_track_with_simpler(track, sample_info, project_dir, builder, bpm=12
     return sample_start_target.get('Id')
 
 
-def update_midi_clip_notes(track, notes):
-    """Remplace les notes dans le premier clip MIDI de la piste"""
-    # Trouver le MainSequencer
-    main_seq = track.find('DeviceChain/MainSequencer')
-    if main_seq is None:
-        print(f"    ⚠️  Pas de MainSequencer trouvé")
-        return False
+def clip_runs(notes, durations, segments=None):
+    """Découpe d'une piste en clips : [(début, fin, notes, numéros de patterns)]
 
-    # Trouver le premier clip MIDI
-    midi_clip = main_seq.find('.//MidiClip')
-    if midi_clip is None:
+    Un clip par suite de patterns consécutifs (segments du replayer, dans l'ordre joué) où la piste
+    joue : il commence au début du pattern de sa première note et finit à la première frontière de
+    pattern où plus rien ne sonne (une note tenue l'étend : Live coupe les notes au bout du clip).
+    Les patterns où la piste ne joue pas n'ont pas de clip. Sans segments : un seul clip depuis 0.
+    """
+    ordered = sorted(notes, key=lambda n: n['time'])
+
+    def note_end(note):
+        return note['time'] + durations.get(id(note), note['duration'])
+
+    if not segments:
+        return [(0.0, math.ceil(max(note_end(n) for n in ordered)), ordered, [])]
+    starts = [segment[0] for segment in segments]
+    boundaries = starts + [segments[-1][1]]
+
+    def boundary_after(time):
+        if time > boundaries[-1] + 1e-9:
+            return math.ceil(time)  # son qui dépasse la fin du morceau
+        return boundaries[bisect_left(boundaries, time - 1e-9)]
+
+    runs = []
+    for note in ordered:
+        end = boundary_after(note_end(note))
+        if runs and note['time'] < runs[-1][1] - 1e-9:
+            runs[-1][1] = max(runs[-1][1], end)
+            runs[-1][2].append(note)
+        else:
+            start = starts[max(0, bisect_right(starts, note['time'] + 1e-9) - 1)]
+            runs.append([start, end, [note]])
+    return [(start, end, run_notes, [number for (s0, s1, number) in segments if start - 1e-9 <= s0 < end - 1e-9])
+            for start, end, run_notes in runs]
+
+
+def clip_name(patterns):
+    """Nom d'un clip d'après ses patterns, dans l'ordre joué (numéros en hexa, comme dans FT2) :
+    « Pattern 0C », « Patterns 21-22-21 », ou « Patterns 0C…1F » au-delà de 4 patterns"""
+    if not patterns:
+        return ''
+    if len(patterns) == 1:
+        return f"Pattern {patterns[0]:02X}"
+    if len(patterns) <= 4:
+        return "Patterns " + '-'.join(f"{number:02X}" for number in patterns)
+    return f"Patterns {patterns[0]:02X}…{patterns[-1]:02X}"
+
+
+def update_midi_clip_notes(track, notes, segments=None):
+    """Écrit les notes de la piste en clips d'arrangement (clip_runs), copies du clip du fragment
+
+    Comme les clips que Live découpe : les notes gardent le temps du morceau, chaque clip n'en montre
+    que sa fenêtre (début de boucle = début du clip). NoteId uniques dans chaque clip.
+    """
+    clips = track.find('DeviceChain/MainSequencer/ClipTimeable/ArrangerAutomation/Events')
+    template = clips.find('MidiClip') if clips is not None else None
+    if template is None:
         print(f"    ⚠️  Pas de MidiClip trouvé")
         return False
-
-    # Calculer la durée totale
     if not notes:
         return True
-
-    # Le clip va jusqu'à la fin de sa dernière note (arrondie au temps) : Live coupe les notes au
-    # bout du clip, et une note peut tenir bien plus que 4 temps depuis la v2.12
-    max_time = math.ceil(max(note['time'] + note['duration'] for note in notes) + LEGATO_OVERLAP)
-
-    # Mettre à jour CurrentEnd et LoopEnd
-    current_end = midi_clip.find('.//CurrentEnd')
-    if current_end is not None:
-        current_end.set('Value', str(max_time))
-
-    loop_end = midi_clip.find('.//Loop/LoopEnd')
-    if loop_end is not None:
-        loop_end.set('Value', str(max_time))
-
-    out_marker = midi_clip.find('.//Loop/OutMarker')
-    if out_marker is not None:
-        out_marker.set('Value', str(max_time))
-
-    # Trouver l'élément Notes/KeyTracks
-    key_tracks = midi_clip.find('.//Notes/KeyTracks')
-    if key_tracks is None:
-        print(f"    ⚠️  Pas de KeyTracks trouvé")
-        return False
-
-    # Supprimer tous les KeyTracks existants
-    for key_track in list(key_tracks):
-        key_tracks.remove(key_track)
+    clips.remove(template)
 
     # Tone portamento : la note qui précède une note en legato la chevauche, pour que le glide de
     # Live glisse sans redémarrer le sample
@@ -584,34 +603,41 @@ def update_midi_clip_notes(track, notes):
         if following.get('legato') and abs(note['time'] + note['duration'] - following['time']) < 1e-6:
             durations[id(note)] = note['duration'] + LEGATO_OVERLAP
 
-    # Grouper les notes par hauteur MIDI
-    notes_by_key = defaultdict(list)
-    for note in notes:
-        midi_key = int(note['note'])
-        if 0 <= midi_key <= 127:
-            notes_by_key[midi_key].append(note)
+    for index, (start, end, run_notes, patterns) in enumerate(clip_runs(notes, durations, segments)):
+        clip = copy.deepcopy(template)
+        clip.set('Id', str(index))
+        clip.set('Time', str(start))
+        set_value(clip, 'CurrentStart', start)
+        set_value(clip, 'CurrentEnd', end)
+        for field, value in (('LoopStart', start), ('LoopEnd', end), ('StartRelative', 0), ('OutMarker', end),
+                             ('HiddenLoopStart', start), ('HiddenLoopEnd', end)):
+            set_value(clip, f'Loop/{field}', value)
+        set_value(clip, 'Name', clip_name(patterns))
 
-    # Créer les nouveaux KeyTracks ; chaque note a un NoteId unique dans le clip (1, 2...), comme Live
-    note_id = 1
-    for midi_key, key_notes in sorted(notes_by_key.items()):
-        key_track = ET.SubElement(key_tracks, 'KeyTrack')
-        key_track.set('Id', str(midi_key))
-
-        notes_elem = ET.SubElement(key_track, 'Notes')
-
-        for note in key_notes:
-            note_event = ET.SubElement(notes_elem, 'MidiNoteEvent')
-            note_event.set('Time', str(note['time']))
-            note_event.set('Duration', str(durations.get(id(note), note['duration'])))
-            note_event.set('Velocity', str(int(note['velocity'])))
-            note_event.set('OffVelocity', '64')
-            note_event.set('NoteId', str(note_id))
-            note_id += 1
-
-        midi_key_elem = ET.SubElement(key_track, 'MidiKey')
-        midi_key_elem.set('Value', str(midi_key))
-
-    set_value(midi_clip, 'Notes/NoteIdGenerator/NextId', note_id)
+        # Notes par hauteur MIDI ; chaque note a un NoteId unique dans le clip (1, 2...), comme Live
+        key_tracks = clip.find('Notes/KeyTracks')
+        for key_track in list(key_tracks):
+            key_tracks.remove(key_track)
+        notes_by_key = defaultdict(list)
+        for note in run_notes:
+            if 0 <= int(note['note']) <= 127:
+                notes_by_key[int(note['note'])].append(note)
+        note_id = 1
+        for midi_key, key_notes in sorted(notes_by_key.items()):
+            key_track = ET.SubElement(key_tracks, 'KeyTrack')
+            key_track.set('Id', str(midi_key))
+            notes_elem = ET.SubElement(key_track, 'Notes')
+            for note in key_notes:
+                note_event = ET.SubElement(notes_elem, 'MidiNoteEvent')
+                note_event.set('Time', str(note['time']))
+                note_event.set('Duration', str(durations.get(id(note), note['duration'])))
+                note_event.set('Velocity', str(int(note['velocity'])))
+                note_event.set('OffVelocity', '64')
+                note_event.set('NoteId', str(note_id))
+                note_id += 1
+            ET.SubElement(key_track, 'MidiKey').set('Value', str(midi_key))
+        set_value(clip, 'Notes/NoteIdGenerator/NextId', note_id)
+        clips.append(clip)
     return True
 
 def note_spans(notes):
@@ -1200,7 +1226,7 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         # Ajouter les notes MIDI : vélocité = volume du canal au début de la note
         for note in track_info['notes']:
             note['velocity'] = velocity_for(note['volume'])
-        update_midi_clip_notes(track, track_info['notes'])
+        update_midi_clip_notes(track, track_info['notes'], song['segments'])
 
         # Automation de volume : changements pendant les notes, enveloppe FT2 avec --envelope
         envelope = track_info['sample'].get('envelope') if enable_envelope else None

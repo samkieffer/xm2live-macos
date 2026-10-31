@@ -127,12 +127,20 @@ def validate_als(als_path):
             issues.append(('erreur', f"{name}: {bad_notes} note(s) invalide(s) (durée ≤ 0, temps < 0 ou vélocité hors 0-127)"))
 
         # NoteId uniques dans chaque clip, sous le compteur du clip (Live 11+) ; notes dans le clip
-        for clip in track.iter('MidiClip'):
-            clip_end = float(clip.find('CurrentEnd').get('Value'))
-            beyond = sum(1 for n in clip.iter('MidiNoteEvent')
-                         if float(n.get('Time')) + float(n.get('Duration')) > clip_end + 1e-6)
-            if beyond:
-                issues.append(('erreur', f"{name}: {beyond} note(s) au-delà de la fin du clip ({clip_end}), coupée(s) par Live"))
+        previous_end = None
+        for clip in sorted(track.iter('MidiClip'), key=lambda c: float(c.find('CurrentStart').get('Value'))):
+            # Fenêtre du clip dans le temps de ses notes : à partir du début de boucle + StartRelative,
+            # sur la longueur du clip dans l'arrangement ; Live coupe ce qui dépasse
+            start, end = float(clip.find('CurrentStart').get('Value')), float(clip.find('CurrentEnd').get('Value'))
+            window = float(clip.find('Loop/LoopStart').get('Value')) + float(clip.find('Loop/StartRelative').get('Value'))
+            outside = sum(1 for n in clip.iter('MidiNoteEvent')
+                          if float(n.get('Time')) < window - 1e-6
+                          or float(n.get('Time')) + float(n.get('Duration')) > window + end - start + 1e-6)
+            if outside:
+                issues.append(('erreur', f"{name}: {outside} note(s) hors de la fenêtre du clip {start}-{end}, coupée(s) par Live"))
+            if previous_end is not None and start < previous_end - 1e-6:
+                issues.append(('erreur', f"{name}: clips qui se chevauchent ({start} < {previous_end})"))
+            previous_end = end
             note_ids = [int(n.get('NoteId', 0)) for n in clip.iter('MidiNoteEvent')]
             next_id = clip.find('Notes/NoteIdGenerator/NextId')
             if len(set(note_ids)) < len(note_ids) or 0 in note_ids:
