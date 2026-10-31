@@ -268,7 +268,7 @@ Exemples:
     parser.add_argument(
         '--envelope',
         action='store_true',
-        help='Ajouter les enveloppes de volume FT2 à l\'automation de volume du Sampler.'
+        help='Ajouter les enveloppes FT2 (volume, panoramique) aux automations.'
     )
 
     parser.add_argument(

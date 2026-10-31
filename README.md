@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.15.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes + Portamento ; voir CHANGELOG.md et AUDIT.md)
+**Version actuelle : 2.16.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes + Portamento ; voir CHANGELOG.md et AUDIT.md)
 
 ## 🎵 Fonctionnalités
 
@@ -19,7 +19,7 @@ Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MO
 - 🎧 **Panning** - Panoramique de chaque canal comme dans FT2 (défaut du sample, 8xx, colonne volume Cx, glissements) : fixe par piste, ou automation avec `--pan-automation`
 - 🎚️ **Sample Offset** - Effet 9xx supporté via Simpler (avec `--sample-offset`, limitation ping-pong→forward)
 - 🔇 **Volume 00 (Note Stop)** - Les volumes 00 raccourcissent automatiquement les notes (XM + MOD effet C00)
-- 🎛️ **Enveloppes** - Forme exacte des enveloppes de volume FT2 dans l'automation de volume (avec `--envelope`)
+- 🎛️ **Enveloppes** - Forme exacte des enveloppes de volume et de panoramique FT2 dans les automations (avec `--envelope`, coché par défaut dans l'app)
 - 🎢 **Tone portamento** - Notes en legato et glide du Sampler, sans redémarrer le sample
 - 🧱 **Clips par patterns** - Un clip par suite de patterns où la piste joue, nommé d'après ses patterns
 - 🎨 **Organisation** - Groupes par instrument, couleurs par canal
@@ -92,7 +92,7 @@ python3 xm2live.py mon_fichier.xm --pan-automation
 # Activer l'effet 9xx (Sample Offset) via Simpler
 python3 xm2live.py mon_fichier.xm --sample-offset
 
-# Ajouter les enveloppes de volume FT2 à l'automation de volume
+# Ajouter les enveloppes FT2 (volume, panoramique) aux automations
 python3 xm2live.py mon_fichier.xm --envelope
 
 # Combiner plusieurs options
@@ -279,7 +279,7 @@ et de l'app).
 - ✅ **Enveloppes de volume** : forme exacte dans l'automation avec `--envelope`
 - ✅ **Volume** : vélocité calibrée + automation du volume du Sampler (jusqu'à -36 dB, minimum du paramètre)
 - ✅ **Tone portamento** : legato + glide ; une seule durée de glissement par piste
-- ✅ **Panning** : panoramique de chaque canal (fixe par piste, automation avec `--pan-automation`) ; enveloppes de panoramique non converties
+- ✅ **Panning** : panoramique de chaque canal (fixe par piste, automation avec `--pan-automation`), enveloppes de panoramique avec `--envelope`
 - ❌ **Formats S3M/IT** : Non supportés (uniquement XM et MOD)
 
 ## 🔮 Futures améliorations possibles
@@ -287,7 +287,6 @@ et de l'app).
 - [ ] Support format S3M (ScreamTracker 3)
 - [ ] Support format IT (Impulse Tracker)
 - [ ] Conversion du vibrato et de l'arpeggio
-- [ ] Enveloppes de panoramique
 - [ ] Interface graphique (GUI)
 - [ ] Mode --force pour reconvertir les fichiers existants
 - [ ] Export des métadonnées (nom module, commentaires)

@@ -296,7 +296,7 @@ def extract_samples_and_patterns(mod_path, samples_dir):
                     samples.append({
                         'instrument': i + 1,
                         'sample': 1,  # MOD n'a qu'un sample par instrument
-                        'name': safe_name,
+                        'name': sample_info['name'].strip(),  # vide si le sample n'a pas de nom
                         'path': wav_path,
                         'relative_note': 0,  # MOD utilise finetune, pas relative_note
                         # Finetune MOD (-8..+7, en 1/8 de demi-ton) → échelle XM (1/128 de demi-ton)

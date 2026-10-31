@@ -2,6 +2,38 @@
 
 Historique des versions et modifications du projet.
 
+## [2.16.0] - 2026-10-31
+
+### Ajouté
+- 🎧 **Enveloppes de panoramique** des instruments (MEC-pan, ESSAI5…) : avec `--envelope` et
+  `--pan-automation`, le panoramique suit l'enveloppe FT2 pendant chaque note
+  (`pan + (env - 32) × (128 - |pan - 128|) / 32`, sustain et boucles). Formule et sens vérifiés sur un
+  module de test rendu par libopenmpt.
+- ✅ App : l'option « Enveloppes » (volume et panoramique) est cochée par défaut.
+
+### Modifié
+- 🏷️ Les pistes et les groupes portent le **numéro de l'instrument en hexa**, comme dans FT2, pour
+  distinguer les homonymes : groupe « 0A NTX PATCH », piste « Ch4 - 0A NTX PATCH », piste fusionnée
+  « 0A NTX PATCH - All notes » ; un sample sans nom garde son numéro seul (« 02 »).
+
+### Corrigé
+- 🔉 **Pistes Simpler bien trop basses** (signalé sur MEC-pan, instrument 0A) : le Simpler du fragment
+  venait d'un exemple réglé à la main, avec une enveloppe d'amplitude qui retombait à -15 dB en 2 ms
+  (decay 2 ms, sustain 0,18, release 4 ms) et un début de sample à 84 % pour les pistes sans `9xx`
+  (dans la queue du son). Il reçoit désormais l'enveloppe par défaut de Live, comme le Sampler, et
+  part du début du sample. Défaut présent depuis l'ajout du Simpler (v2.4).
+- 🎛️ Le filtre du Sampler (passe-bas à 22 kHz qui suivait la hauteur des notes) est désactivé : FT2
+  n'a pas de filtre.
+- 🎚️ **Effet 9xx** : l'offset était divisé par deux. FT2 démarre le sample à xx × 256 frames, en 8
+  comme en 16 bits (mesuré avec libopenmpt sur un module de test) ; `900` reprend l'offset précédent
+  au lieu de revenir au début du sample.
+
+### Technique
+- Automations de volume et de panoramique écrites par une même fonction (valeur du canal en marches,
+  enveloppe en segments, valeur tenue entre les notes, paliers simplifiés) : mêmes courbes pendant les
+  notes, beaucoup moins de points (713 → 11 sur une piste de BANG.MOD).
+- Instantané de non-régression `discotec-app` avec les options par défaut de l'app.
+
 ## [2.15.0] - 2026-10-31
 
 ### Modifié

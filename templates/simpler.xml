@@ -226,7 +226,7 @@
 										<IsModulated Value="true"/>
 										<SampleStart>
 											<LomId Value="0"/>
-											<Manual Value="0.8359375"/>
+											<Manual Value="0"/>
 											<MidiControllerRange>
 												<Min Value="0"/>
 												<Max Value="1"/>
@@ -1160,7 +1160,7 @@
 									<Envelope>
 										<AttackTime>
 											<LomId Value="0"/>
-											<Manual Value="0.9999998808"/>
+											<Manual Value="0.1000000015"/>
 											<MidiControllerRange>
 												<Min Value="0.1000000015"/>
 												<Max Value="20000"/>
@@ -1202,7 +1202,7 @@
 										</AttackSlope>
 										<DecayTime>
 											<LomId Value="0"/>
-											<Manual Value="2"/>
+											<Manual Value="599.999878"/>
 											<MidiControllerRange>
 												<Min Value="1"/>
 												<Max Value="60000"/>
@@ -1244,7 +1244,7 @@
 										</DecaySlope>
 										<SustainLevel>
 											<LomId Value="0"/>
-											<Manual Value="0.1795002073"/>
+											<Manual Value="1"/>
 											<MidiControllerRange>
 												<Min Value="0.0003162277571"/>
 												<Max Value="1"/>
@@ -1258,7 +1258,7 @@
 										</SustainLevel>
 										<ReleaseTime>
 											<LomId Value="0"/>
-											<Manual Value="4.00000048"/>
+											<Manual Value="50.0000038"/>
 											<MidiControllerRange>
 												<Min Value="1"/>
 												<Max Value="60000"/>

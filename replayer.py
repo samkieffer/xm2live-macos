@@ -259,6 +259,14 @@ def glide_ticks(speed, from_note, to_note, file_format):
     return abs(to_note - from_note) / semitones_per_tick
 
 
+def sample_offset(cell, memory):
+    """Offset 9xx de la case (en unités de 256 frames), None sans 9xx ; 900 reprend le précédent"""
+    if cell.effect != 0x9:
+        return None
+    memory['offset'] = cell.param or memory['offset']
+    return memory['offset']
+
+
 def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
     """Joue le morceau et produit les notes par canal et par instrument
 
@@ -305,7 +313,8 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
     # fixent jusqu'au prochain numéro d'instrument, les glissements le déplacent tick par tick
     pan = {}
     pan_moves = defaultdict(list)  # canal -> [(temps, panoramique)] à chaque changement
-    memory = defaultdict(lambda: {'slide': 0, 'fine_up': 0, 'fine_down': 0, 'pan_slide': 0, 'porta': 0})
+    memory = defaultdict(lambda: {'slide': 0, 'fine_up': 0, 'fine_down': 0, 'pan_slide': 0, 'porta': 0,
+                                  'offset': 0})
     loop_start = defaultdict(int)  # E6x : ligne de début de boucle, par canal
     loop_count = defaultdict(int)
     released_instruments = {}
@@ -486,7 +495,7 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                     'peak': 0,
                     'pan': pan.get(channel, 128),
                     'glide_ms': glide_ms,
-                    'sample_offset_xm': param if effect == 0x9 else None,
+                    'sample_offset_xm': sample_offset(cell, memory[channel]),
                 }
                 events[channel].append(note)
                 fading_in.pop(channel, None)

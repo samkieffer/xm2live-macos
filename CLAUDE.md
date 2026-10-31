@@ -6,7 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.15.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+**Status:** Production-ready (Version 2.16.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+
+**v2.16.0 (2026-10-31):** FT2 panning envelopes in the pan automation (with `--envelope`, ticked by
+default in the app), 9xx offset fixed (offset × 256 frames, was halved), 900 reuses the last offset,
+Simpler amp envelope and sample start reset to Live defaults (Simpler tracks were ~15 dB too low),
+Sampler filter off, track and group names prefixed with the hex instrument number ("0A NTX PATCH").
 
 **v2.15.0 (2026-10-31):** one arrangement clip per run of patterns where a track plays (named after
 the patterns), instead of one clip from bar 1 to the last note.
@@ -184,7 +189,8 @@ samples = [{
     'panning': int,  # 0-255 (0=left, 128=center, 255=right)
     'length': int,  # frames
     'envelope': dict,  # XM only: volume envelope of the instrument (points, sustain, loop)
-    'fadeout': int  # XM only: volume decrease per tick after a key-off (out of 32768)
+    'fadeout': int,  # XM only: volume decrease per tick after a key-off (out of 32768)
+    'pan_envelope': dict  # XM only: panning envelope of the instrument (values 0-64, 32 = center)
 }]
 
 patterns = [{
@@ -383,9 +389,16 @@ it per tick. Each note gets `pan` (at its start) and `pan_moves` (changes during
   `Mixer > Pan` (`create_pan_automation()`: two points at the same time per change). The zone must
   stay centered: the mixer pan is a balance, it cannot move a sound panned hard in the zone
 - varying panning without the flag → the zone takes the panning heard longest
+- `--envelope` (with `--pan-automation`): the instrument's panning envelope makes the panning vary
+  within each note, like FT2: `pan + (env - 32) × (128 - |pan - 128|) / 32` (env 0-64, high = right),
+  sustain and loops as for the volume envelope (`replayer.envelope_curve()`)
 
-Checked against libopenmpt's channel VU meters (left/right) on DISCOTEC, BDTN and MEC-pan: every
-note agrees except short notes (meter falloff) and instruments with a panning envelope.
+Automations (volume and pan) are written by `write_automation()`: per note, the channel value in steps
+and the envelope in segments (`segment_points()`), held between notes, flat runs removed.
+
+Checked against libopenmpt: channel VU meters (left/right) on DISCOTEC, BDTN and MEC-pan agree for
+every note except short ones (meter falloff); the panning envelope formula and direction on a test
+module rendered in stereo (balance within 0.01).
 
 ## Known Limitations (Accepted, Do Not Fix)
 
@@ -396,11 +409,10 @@ note agrees except short notes (meter falloff) and instruments with a panning en
     - LIMITATION: Simpler doesn't support ping-pong loops (auto-converted to forward)
     - LIMITATION: Multi-sample not supported (loads only first sample)
     - Simpler fragment: `templates/simpler.xml`
-- **Volume envelopes:** only with `--envelope` (in the volume automation); the part after a key-off
+- **Volume and panning envelopes:** only with `--envelope` (ticked by default in the app); the part after a key-off
   is the Sampler release (fadeout), not the envelope's tail
 - **Volume floor:** the device volume stops at -36 dB below the note's start: fades and gates dip to
   -36 dB, not to silence (a note still ends at its last silence)
-- **Panning envelopes (instrument):** not converted (MEC-pan, ESSAI5); the panning stays the channel's
 - **S3M/IT formats:** NOT supported - only XM and MOD
 - **Tone portamento:** one glide time per track (Live has one per device); the slide speed varies in FT2
 - **Key-off with an instrument number on the same cell (41 cells in the collection):** treated as a
@@ -498,20 +510,21 @@ create_sample_offset_automation(track, notes, sample_start_id, sample_length)
 - ADSR: `VolumeAndPan/Envelope` (same as Sampler)
 
 **Conversion:**
-- XM offset (0-255) → Ableton Sample Start (0.0-1.0)
-- Approximation: `sample_start = offset_xm / 255.0`
-- Not pixel-perfect but good enough for most use cases
-- Users can adjust manually if needed
+- 9xx starts the sample at xx × 256 frames, 8-bit and 16-bit alike (measured with libopenmpt on a
+  test module, 2026-10-31; before v2.16 the offset was halved)
+- Ableton Sample Start (0.0-1.0, fraction of the sample) = `offset × 256 / sample_length`, capped at 1
+- 900 reuses the previous offset of the channel (`replayer.sample_offset()`)
 
 **Limitations:**
 - Ping-pong loops → forward (Simpler doesn't support ping-pong)
 - Multi-sample not supported (Simpler limitation, loads first sample only)
-- Conversion is approximative (not sample-accurate)
 
 **Notes:** `replayer.play_song()` copies the 9xx parameter of each note into `sample_offset_xm`
 
 **Template:** `templates/simpler.xml` (OriginalSimpler from a user example, cleaned by
-`tools/extract_fragments.py`)
+`tools/extract_fragments.py`). That example was tuned by hand: `populate_track_with_simpler()` copies
+the Sampler fragment's amp envelope (Live defaults) onto it and sets Sample Start to 0, so that a
+regenerated or hand-tuned fragment cannot change the sound (it had decay 2 ms / sustain 0.18 / start 84 %).
 
 ### 10. Volume 00 Support (v2.5.0)
 
@@ -586,7 +599,8 @@ Test files that demonstrate specific features (the regression set is tools/regre
 
 ## Version History Summary
 
-**v2.15.0 (Current)** - One clip per run of patterns
+**v2.16.0 (Current)** - Panning envelopes, 9xx offset fixed
+**v2.15.0** - One clip per run of patterns
 **v2.14.0** - Lot 4 of AUDIT.md: calibrated velocity, volume automation, envelopes, tone portamento glide
 **v2.13.0** - Lot 3 of AUDIT.md: .als assembled from Live-saved fragments, buildable removed
 **v2.12.1** - Missing patterns play 64 empty rows (FT2)

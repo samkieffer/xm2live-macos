@@ -148,34 +148,37 @@ def parse_pattern_data(data, num_rows, num_channels):
     return rows
 
 
-def read_volume_envelope(extra):
-    """Enveloppe de volume et fadeout d'un instrument
+def read_envelopes(extra):
+    """Enveloppes de volume et de panoramique, et fadeout, d'un instrument
 
     Args:
         extra: suite de l'en-tête d'instrument, après la taille d'en-tête de sample (octet 33) :
-            table note → sample (96), points volume (12 × 2 mots), points panoramique, nombres de
-            points, sustain et boucle, types, vibrato, fadeout
+            table note → sample (96), points volume puis panoramique (12 × 2 mots chacun), nombres
+            de points, sustain et boucles, types, vibrato, fadeout
 
     Returns:
-        (envelope, fadeout) ; envelope = {'enabled', 'sustain_enabled', 'loop_enabled', 'num_points',
-        'points' [(tick, valeur 0-64)], 'sustain_point', 'loop_start', 'loop_end'}
+        (volume, panning, fadeout) ; une enveloppe = {'enabled', 'sustain_enabled', 'loop_enabled',
+        'num_points', 'points' [(tick, valeur 0-64)], 'sustain_point', 'loop_start', 'loop_end'}
+        (panoramique : 32 = centre)
     """
     extra = extra + bytes(max(0, 208 - len(extra)))  # en-tête court : champs absents à 0
-    num_points = min(extra[192], 12)
-    env_type = extra[200]
-    points = [struct.unpack_from('<HH', extra, 96 + 4 * k) for k in range(num_points)]
-    envelope = {
-        'enabled': bool(env_type & 1) and num_points > 0,
-        'sustain_enabled': bool(env_type & 2),
-        'loop_enabled': bool(env_type & 4),
-        'num_points': num_points,
-        'points': points,
-        'sustain_point': extra[194],
-        'loop_start': extra[195],
-        'loop_end': extra[196],
-    }
+
+    def envelope(points_at, count_at, sustain_at, type_at):
+        num_points = min(extra[count_at], 12)
+        env_type = extra[type_at]
+        return {
+            'enabled': bool(env_type & 1) and num_points > 0,
+            'sustain_enabled': bool(env_type & 2),
+            'loop_enabled': bool(env_type & 4),
+            'num_points': num_points,
+            'points': [struct.unpack_from('<HH', extra, points_at + 4 * k) for k in range(num_points)],
+            'sustain_point': extra[sustain_at],
+            'loop_start': extra[sustain_at + 1],
+            'loop_end': extra[sustain_at + 2],
+        }
+
     fadeout = struct.unpack_from('<H', extra, 206)[0]
-    return envelope, fadeout
+    return envelope(96, 192, 194, 200), envelope(144, 193, 197, 201), fadeout
 
 
 def read_patterns(f, num_patterns, num_channels):
@@ -279,7 +282,7 @@ def extract_samples_and_patterns(xm_path, samples_dir):
 
                     remaining = inst_header_size - 33
                     extra = f.read(remaining) if remaining > 0 else b''
-                    envelope, fadeout = read_volume_envelope(extra)
+                    envelope, pan_envelope, fadeout = read_envelopes(extra)
 
                     # Lire les headers de samples
                     sample_headers = []
@@ -369,6 +372,7 @@ def extract_samples_and_patterns(xm_path, samples_dir):
                                     'panning': header['panning'],  # 0-255 (0=gauche, 128=centre, 255=droite)
                                     'length': len(decoded),  # Longueur en samples (pour effet 9xx)
                                     'envelope': envelope,  # enveloppe de volume de l'instrument
+                                    'pan_envelope': pan_envelope,
                                     'fadeout': fadeout
                                 })
 

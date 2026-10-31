@@ -6,7 +6,7 @@ import AppKit
 struct TrackOptions: Equatable {
     var panAutomation = true
     var sampleOffset = true
-    var envelope = false
+    var envelope = true
     var mergeTracks = false
 }
 

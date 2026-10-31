@@ -34,7 +34,7 @@ from live_set import LiveSetBuilder, set_value
 from als_validator import validate_als, print_report
 
 # Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
-__version__ = '2.15.0'
+__version__ = '2.16.0'
 
 def update_track_name(track, new_name):
     """Nom d'une piste : UserName (nom donné par l'utilisateur) et EffectiveName (nom affiché).
@@ -353,9 +353,17 @@ def populate_track_with_simpler(track, sample_info, project_dir, builder, bpm=12
     if sampler is not None:
         devices.remove(sampler)
 
-    # Simpler de templates/simpler.xml, identifiants renumérotés
+    # Simpler de templates/simpler.xml, identifiants renumérotés. Ce fragment vient d'un exemple réglé à
+    # la main : enveloppe d'amplitude remise à celle du Sampler (valeurs par défaut de Live, l'autre
+    # chutait de 15 dB en 2 ms) et sample joué depuis le début quand aucune note n'a d'effet 9xx
     simpler = builder.copy_fragment('simpler')
     devices.append(simpler)
+    sampler_envelope = builder.fragments['midi_track'].find(
+        'DeviceChain/DeviceChain/Devices/MultiSampler/VolumeAndPan/Envelope')
+    for param in sampler_envelope:
+        if param.find('Manual') is not None:
+            set_value(simpler, f'VolumeAndPan/Envelope/{param.tag}/Manual', param.find('Manual').get('Value'))
+    set_value(simpler, 'Player/LoopModulators/SampleStart/Manual', 0)
 
     # Trouver la structure Player/MultiSampleMap/SampleParts/MultiSamplePart
     # (oui, Simpler a la même structure que Sampler pour les samples)
@@ -694,8 +702,8 @@ def create_sample_offset_automation(track, notes, target_id, sample_length):
         offset = note.get('sample_offset_xm')
         sample_start = '0.0'
         if offset is not None:
-            # 9xx : multiplicateur de 256 octets, soit offset × 128 frames pour un sample 16 bits
-            sample_start = (offset * 256 / 2.0) / sample_length if sample_length > 0 else 0.0
+            # 9xx démarre le sample à offset × 256 frames, 8 comme 16 bits (mesuré avec libopenmpt)
+            sample_start = offset * 256.0 / sample_length if sample_length > 0 else 0.0
             sample_start = max(0.0, min(1.0, sample_start))
         add_float_event(events, start, sample_start)
         add_float_event(events, end, sample_start)
@@ -726,6 +734,73 @@ def volume_db(gain):
     return max(DEVICE_VOLUME_MIN_DB, min(36.0, DEVICE_VOLUME_DB + 20 * math.log10(gain)))
 
 
+def segment_points(start, end, initial, steps, curve, neutral, combine):
+    """Points (temps, valeur) d'une note pour une automation
+
+    Une valeur du canal (`initial`, puis les marches `steps` [(temps, valeur)]) combinée par
+    combine(valeur, enveloppe) à une enveloppe FT2 `curve` [(temps, 0-64)] qui varie par segments
+    (sans enveloppe : `neutral`). Une marche donne deux points au même instant.
+    """
+    def envelope_at(time):
+        if not curve:
+            return neutral
+        if time <= curve[0][0]:
+            return curve[0][1]
+        for (t0, v0), (t1, v1) in zip(curve, curve[1:]):
+            if t0 <= time <= t1:
+                return v1 if t1 == t0 else v0 + (v1 - v0) * (time - t0) / (t1 - t0)
+        return curve[-1][1]
+
+    current = initial
+    changes = sorted([(t, 0, v) for t, v in steps if start < t < end] +
+                     [(t, 1, None) for t, _ in curve if start < t < end], key=lambda c: (c[0], c[1]))
+    points = [(start, combine(current, envelope_at(start)))]
+    for time, kind, value in changes:
+        if kind == 0:  # marche de la valeur du canal
+            points.append((time, combine(current, envelope_at(time))))
+            current = value
+        points.append((time, combine(current, envelope_at(time))))
+    points.append((end, combine(current, envelope_at(end))))
+    return points
+
+
+def timed_envelope(envelope, note, start):
+    """Enveloppe FT2 d'une note en temps du morceau : [(temps, valeur 0-64)], ou [] sans enveloppe"""
+    if envelope is None:
+        return []
+    return [(start + tick * note['tick'], value)
+            for tick, value in envelope_curve(envelope, note['duration'] / note['tick'])]
+
+
+def write_automation(track, target_id, notes, note_points):
+    """Automation d'une piste qui suit ses notes (note_points(note, début, fin) → [(temps, valeur)])
+
+    Entre deux notes la valeur est tenue, puis change en marche au début de la note suivante ; les
+    points qui ne changent rien sont retirés. Returns: le nombre de points écrits.
+    """
+    points = []
+    for note, start, end in note_spans(notes):
+        values = note_points(note, start, end)
+        if points and values[0][0] > points[-1][0]:
+            points.append((values[0][0], points[-1][1]))  # valeur tenue jusqu'à la note
+        points.extend(values)
+    simplified = []
+    for point in points:
+        if simplified and point == simplified[-1]:
+            continue
+        if len(simplified) >= 2 and simplified[-2][1] == simplified[-1][1] == point[1]:
+            simplified[-1] = point  # palier : seul son dernier point compte
+            continue
+        simplified.append(point)
+
+    events = add_automation_envelope(track, target_id)
+    add_float_event(events, '0.0', simplified[0][1])  # valeur avant la première note
+    for time, value in simplified:
+        if time > 0 or value != simplified[0][1]:
+            add_float_event(events, time, value)
+    return len(events)
+
+
 def create_volume_automation(track, notes, envelope=None):
     """Automation du volume du Sampler / Simpler : ce qui change pendant chaque note
 
@@ -742,84 +817,45 @@ def create_volume_automation(track, notes, envelope=None):
     if target is None:
         return False
 
-    points = []  # (temps, dB) ; deux points au même instant = marche
-    for note, start, end in note_spans(notes):
-        reference = note['volume']
-        curve = []  # (temps, valeur de l'enveloppe 0-64), reliés par des segments
-        if envelope is not None:
-            ticks = note['duration'] / note['tick']
-            curve = [(start + tick * note['tick'], value) for tick, value in envelope_curve(envelope, ticks)]
+    def note_points(note, start, end):
+        moves, initial = note['volume_moves'], note['volume']
+        if moves and moves[0][0] <= start:
+            initial, moves = moves[0][1], moves[1:]  # fondu d'entrée : la note part de 0
+        return segment_points(start, end, initial, moves, timed_envelope(envelope, note, start), 64,
+                              lambda level, env: round(volume_db(level / note['volume'] * env / 64.0), 4))
 
-        def envelope_at(time):
-            if not curve:
-                return 64.0
-            if time <= curve[0][0]:
-                return curve[0][1]
-            for (t0, v0), (t1, v1) in zip(curve, curve[1:]):
-                if t0 <= time <= t1:
-                    return v1 if t1 == t0 else v0 + (v1 - v0) * (time - t0) / (t1 - t0)
-            return curve[-1][1]
-
-        def value(level, time):
-            return volume_db(level / reference * envelope_at(time) / 64.0)
-
-        level = reference
-        changes = sorted([(t, 'level', v) for t, v in note['volume_moves']] +
-                         [(t, 'envelope', v) for t, v in curve], key=lambda c: c[0])
-        if changes and changes[0][0] <= start and changes[0][1] == 'level':
-            level = changes.pop(0)[2]  # fondu d'entrée : la note part de 0
-        points.append((start, value(level, start)))
-        for time, kind, new in changes:
-            if not start < time < end and kind == 'level':
-                continue
-            if kind == 'level':
-                points.append((time, value(level, time)))
-                level = new
-            points.append((min(time, end), value(level, min(time, end))))
-        points.append((end, value(level, end)))
-
-    events = add_automation_envelope(track, target.get('Id'))
-    add_float_event(events, '0.0', round(points[0][1], 4))  # valeur avant la première note
-    previous = (0.0, points[0][1])
-    for time, db in points:
-        if time == previous[0] and abs(db - previous[1]) < 1e-9:
-            continue
-        add_float_event(events, time, round(db, 4))
-        previous = (time, db)
-    print(f"    → Automation volume: {len(events)} points")
+    count = write_automation(track, target.get('Id'), notes, note_points)
+    print(f"    → Automation volume: {count} points")
     return True
 
 
-def create_pan_automation(track, notes):
-    """Automation du panoramique de la piste (mixer), en escalier
+def create_pan_automation(track, notes, envelope=None):
+    """Automation du panoramique de la piste (mixer)
 
     Chaque note impose son panoramique à son début, puis ses changements pendant la note (Cx, 8xx,
-    glissements). La zone du Sampler reste alors au centre : le mixer porte tout le panoramique.
+    glissements), en escalier ; avec `envelope` (enveloppe de panoramique FT2, --envelope), le
+    panoramique suit aussi sa forme : pan + (env - 32) × (128 - |pan - 128|) / 32, comme FT2. La
+    zone du Sampler reste alors au centre : le mixer porte tout le panoramique.
 
     Args:
         track: élément MidiTrack
         notes: notes avec pan (0-255) et pan_moves [(temps, pan)]
+        envelope: enveloppe de panoramique de l'instrument, ou None
     """
     pan_target = track.find('DeviceChain/Mixer/Pan/AutomationTarget')
     if pan_target is None:
         print("    ⚠️  AutomationTarget du Pan non trouvé")
         return
-    events = add_automation_envelope(track, pan_target.get('Id'))
 
-    changes = []
-    for note, start, end in note_spans(notes):
-        changes.append((start, note['pan']))
-        changes.extend(move for move in note['pan_moves'] if move[0] < end)
-    current = changes[0][1]
-    add_float_event(events, '0.0', pan_to_ableton(current))
-    for time, pan in changes[1:]:
-        if pan != current:
-            # Marche : deux points au même instant (ancienne valeur, nouvelle valeur)
-            add_float_event(events, time, pan_to_ableton(current))
-            add_float_event(events, time, pan_to_ableton(pan))
-            current = pan
+    def combine(pan, env):
+        return pan_to_ableton(max(0.0, min(255.0, pan + (env - 32) * (128 - abs(pan - 128)) / 32)))
 
-    print(f"    → Automation panning: {len(events)} points")
+    def note_points(note, start, end):
+        return segment_points(start, end, note['pan'], note['pan_moves'],
+                              timed_envelope(envelope, note, start), 32, combine)
+
+    count = write_automation(track, pan_target.get('Id'), notes, note_points)
+    print(f"    → Automation panning: {count} points")
 
 
 LIVE_TEMPO_MIN, LIVE_TEMPO_MAX = 20.0, 999.0
@@ -1022,7 +1058,7 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         template_path: set Live personnel dont reprendre les fragments (optionnel, cf. live_set.py)
         output_dir: Répertoire de sortie (optionnel)
         enable_pan_automation: Activer les automations de panning (effet 8xx)
-        enable_envelope: Enveloppes de volume FT2 dans l'automation de volume
+        enable_envelope: Enveloppes FT2 (volume, panoramique) dans les automations
         enable_sample_offset: Activer l'effet 9xx (Sample Offset) avec Simpler
     """
 
@@ -1137,8 +1173,10 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
     for instrument in unique_instruments:
         sample = instrument_to_sample[instrument]
         # Notation hexadécimale pour l'instrument (01, 02, ..., 0A, 0B, etc.)
+        # Nom de l'instrument : son numéro en hexa (comme dans FT2), qui distingue les homonymes, puis
+        # le nom du sample (« 0A NTX PATCH ») ; sans nom, le numéro seul
         inst_hex = f"{instrument:02X}"
-        sample_name = sample['name'].strip() if sample['name'].strip() else f"Instrument_{inst_hex}_Sample_1"
+        sample_name = f"{inst_hex} {sample['name'].strip()}" if sample['name'].strip() else inst_hex
 
         # Collecter toutes les pistes (canaux) qui utilisent cet instrument
         instrument_tracks = []
@@ -1171,11 +1209,11 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
                 if len(notes_for_track) == 0:
                     continue  # Skip empty tracks
 
-                # Nom de la piste: "All notes" pour la première, "All notes (2)", "All notes (3)", etc. pour les auxiliaires
+                # Nom de la piste : « 0A NTX PATCH - All notes », puis « … - All notes (2) », etc. pour les auxiliaires
                 if i == 0:
-                    track_name = "All notes"
+                    track_name = f"{sample_name} - All notes"
                 else:
-                    track_name = f"All notes ({i+1})"
+                    track_name = f"{sample_name} - All notes ({i+1})"
 
                 merged_track = {
                     'instrument': instrument,
@@ -1206,9 +1244,13 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         use_simpler = (enable_sample_offset and instrument in instruments_with_9xx)
 
         # Panoramique : fixe sur la zone du Sampler s'il ne varie pas ; sinon automation du mixer
-        # (--pan-automation, zone au centre) ou, sans elle, le panoramique le plus entendu
+        # (--pan-automation, zone au centre) ou, sans elle, le panoramique le plus entendu. Avec
+        # --envelope, l'enveloppe de panoramique de l'instrument le fait aussi varier
+        pan_envelope = track_info['sample'].get('pan_envelope') if enable_envelope else None
+        if not (pan_envelope and pan_envelope['enabled'] and any(v != 32 for _, v in pan_envelope['points'])):
+            pan_envelope = None
         constant_pan, heard_pan = track_panning(track_info['notes'])
-        automate_pan = enable_pan_automation and constant_pan is None
+        automate_pan = enable_pan_automation and (constant_pan is None or pan_envelope is not None)
         zone_pan = 128 if automate_pan else (constant_pan if constant_pan is not None else heard_pan)
 
         if use_simpler:
@@ -1237,7 +1279,7 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
             create_sample_offset_automation(track, track_info['notes'], sample_start_id, track_info['sample']['length'])
 
         if automate_pan:
-            create_pan_automation(track, track_info['notes'])
+            create_pan_automation(track, track_info['notes'], pan_envelope)
 
         # Piste repliée, non armée
         set_value(track, 'DeviceChain/MainSequencer/Recorder/IsArmed', 'false')
@@ -1356,8 +1398,8 @@ SWITCHES DISPONIBLES
                     LIMITATION: ping-pong loops → forward
                     Par défaut: désactivé
 
---envelope          Ajoute les enveloppes de volume FT2 à l'automation de
-                    volume du Sampler (forme exacte, note par note)
+--envelope          Ajoute les enveloppes FT2 (volume, panoramique) aux
+                    automations (forme exacte, note par note)
                     Par défaut: désactivé
 
 --merge-tracks      Crée une piste de référence "ALL" par instrument
@@ -1389,7 +1431,7 @@ Documentation complète: README.md
                         help='Activer les automations de panning (effet 8xx). '
                              'Par défaut désactivé car rare dans les modules.')
     parser.add_argument('--envelope', action='store_true',
-                        help='Ajouter les enveloppes de volume FT2 à l\'automation de volume du Sampler '
+                        help='Ajouter les enveloppes FT2 (volume, panoramique) aux automations '
                              '(forme exacte, note par note).')
     parser.add_argument('--sample-offset', action='store_true',
                         help='Activer l\'effet 9xx (Sample Offset) avec Simpler. '
