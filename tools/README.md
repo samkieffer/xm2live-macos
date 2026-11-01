@@ -58,6 +58,19 @@ version de Live, les régénérer depuis un set enregistré par cette version :
 Seuls les fragments présents dans le set sont remplacés (`--only` pour en choisir). Ils sont nettoyés :
 ni nom, ni chemin de sample, ni note, ni automation.
 
+## Effets de hauteur : `check_pitch.py`
+
+Génère de petits modules (XM table linéaire, XM table Amiga, MOD) au sample sinusoïdal, avec un effet
+de hauteur chacun (glissements, arpeggio, vibrato), les fait rendre par libopenmpt,
+mesure la hauteur de chaque tick et la compare à celle que calcule `replayer.py`.
+
+```bash
+python3 tools/check_pitch.py       # -v pour voir les hauteurs tick par tick
+```
+
+État au 01/11/2026 : 11 cas sur 11 à moins de 0,05 demi-ton. OpenMPT joue les MOD à la fréquence PAL de
+l'Amiga (0,16 demi-ton sous les 8363 Hz de FT2 et du convertisseur) ; l'outil en tient compte.
+
 ## Validation : `../als_validator.py`
 
 Lancé automatiquement à la fin de chaque conversion, et utilisable seul :

@@ -16,7 +16,7 @@ struct OptionDescriptor: Identifiable {
     let help: String
 }
 
-/// Les 4 options de conversion, dans l'ordre d'affichage.
+/// Les options de conversion, dans l'ordre d'affichage.
 let trackOptionDescriptors: [OptionDescriptor] = [
     OptionDescriptor(id: "pan", keyPath: \.panAutomation,
                      icon: "arrow.left.and.right",
@@ -30,6 +30,10 @@ let trackOptionDescriptors: [OptionDescriptor] = [
                      icon: "alternatingcurrent",
                      label: "Enveloppes FT2 (volume, panoramique)",
                      help: "Forme exacte des enveloppes de volume et de panoramique FT2 dans les automations"),
+    OptionDescriptor(id: "pitch", keyPath: \.pitchEffects,
+                     icon: "waveform.path.ecg",
+                     label: "Effets de hauteur (glissements, arpeggio, vibrato)",
+                     help: "Glissements, arpeggio et vibrato en pitch bend dans les clips"),
     OptionDescriptor(id: "merge", keyPath: \.mergeTracks,
                      icon: "arrow.triangle.merge",
                      label: "Merge tracks (piste « All notes » par instrument)",

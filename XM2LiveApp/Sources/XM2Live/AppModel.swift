@@ -7,6 +7,7 @@ struct TrackOptions: Equatable {
     var panAutomation = true
     var sampleOffset = true
     var envelope = true
+    var pitchEffects = true
     var mergeTracks = false
 }
 

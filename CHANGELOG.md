@@ -2,6 +2,24 @@
 
 Historique des versions et modifications du projet.
 
+## [2.17.0] - 2026-11-01
+
+### Ajouté
+- 🎚️ **Effets de hauteur** (`--pitch-effects`, coché par défaut dans l'app) : glissements `1xx`/`2xx`,
+  `E1x`/`E2x` et `X1x`/`X2x` (112 fichiers), arpeggio `0xy` (106 fichiers) et vibrato `4xy`/`6xy`, en
+  **enveloppes de pitch bend dans les clips** (plage de
+  pitch bend du Sampler à 24 demi-tons, le maximum de Live, mesuré : un réglage à 48 joue la moitié ;
+  au-delà de deux octaves l'écart est borné, 1 123 notes dans 13 fichiers). Les effets suivent leurs
+  clips quand on les déplace. Mesuré aussi : Live rend les marches de 20 ms de l'arpeggio sans lissage.
+  Le replayer suit la période de chaque canal comme FT2 (tables linéaire et Amiga, MOD), y compris
+  l'ordre de l'arpeggio de FT2 (note, +y, +x) et le vibrato qui baisse d'abord.
+- Le tone portamento reste le glide du Sampler de la 2.14 : fait en pitch bend, le glissement doit
+  compenser au même instant le saut de note des notes en legato (une octave à chaque note sur ALIEN.XM),
+  et Live laisse entendre de légers clics.
+- 🎯 `tools/check_pitch.py` : effets de hauteur comparés tick par tick à libopenmpt sur des modules
+  générés (11 cas, écart < 0,05 demi-ton).
+- Le validateur vérifie aussi l'ordre des points et la plage des enveloppes de clip.
+
 ## [2.16.0] - 2026-10-31
 
 ### Ajouté

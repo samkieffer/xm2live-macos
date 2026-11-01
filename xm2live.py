@@ -34,7 +34,7 @@ from live_set import LiveSetBuilder, set_value
 from als_validator import validate_als, print_report
 
 # Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
-__version__ = '2.16.0'
+__version__ = '2.17.0'
 
 def update_track_name(track, new_name):
     """Nom d'une piste : UserName (nom donné par l'utilisateur) et EffectiveName (nom affiché).
@@ -588,11 +588,30 @@ def clip_name(patterns):
     return f"Patterns {patterns[0]:02X}…{patterns[-1]:02X}"
 
 
-def update_midi_clip_notes(track, notes, segments=None):
+def note_pitch_points(note, start, end):
+    """Écart de hauteur d'une note (replayer : pitch, pitch_moves) en valeurs de pitch bend"""
+    return segment_points(start, end, note.get('pitch', 0.0), note.get('pitch_moves', []), [], 0,
+                          lambda semitones, env: pitch_bend_value(semitones))
+
+
+def write_pitch_bend(track, clip, notes):
+    """Enveloppe de pitch bend du clip (glissements, arpeggio, vibrato), si besoin"""
+    if not any(note.get('pitch') or note.get('pitch_moves') for note in notes):
+        return 0
+    points = automation_points(notes, note_pitch_points)
+    target = track.find('DeviceChain/MainSequencer/MidiControllers/ControllerTargets.0').get('Id')
+    events = add_clip_envelope(clip, target, points[0][1])
+    for time, value in points:
+        add_float_event(events, time, value)
+    return len(events)
+
+
+def update_midi_clip_notes(track, notes, segments=None, pitch_bend=False):
     """Écrit les notes de la piste en clips d'arrangement (clip_runs), copies du clip du fragment
 
     Comme les clips que Live découpe : les notes gardent le temps du morceau, chaque clip n'en montre
-    que sa fenêtre (début de boucle = début du clip). NoteId uniques dans chaque clip.
+    que sa fenêtre (début de boucle = début du clip). NoteId uniques dans chaque clip. Avec
+    `pitch_bend`, chaque clip reçoit l'enveloppe de pitch bend de ses notes (write_pitch_bend).
     """
     clips = track.find('DeviceChain/MainSequencer/ClipTimeable/ArrangerAutomation/Events')
     template = clips.find('MidiClip') if clips is not None else None
@@ -646,6 +665,8 @@ def update_midi_clip_notes(track, notes, segments=None):
             ET.SubElement(key_track, 'MidiKey').set('Value', str(midi_key))
         set_value(clip, 'Notes/NoteIdGenerator/NextId', note_id)
         clips.append(clip)
+        if pitch_bend:
+            write_pitch_bend(track, clip, run_notes)
     return True
 
 def note_spans(notes):
@@ -676,6 +697,37 @@ def add_automation_envelope(track, target_id):
     transform_state = ET.SubElement(automation, 'AutomationTransformViewState')
     ET.SubElement(transform_state, 'IsTransformPending').set('Value', 'false')
     ET.SubElement(transform_state, 'TimeAndValueTransforms')
+    return events
+
+
+# Pitch bend : enveloppe de clip sur la cible ControllerTargets.0 de la piste (MidiControllers),
+# valeurs MIDI -8192..8191 sur la plage PitchBendRange (demi-tons) de l'instrument. Mesuré dans
+# Live 12.4 (tools/live_calibration.py) : la plage plafonne à 24 (48 donne 24) ; au-delà de deux
+# octaves, l'écart est borné
+PITCH_BEND_RANGE = 24
+
+
+def pitch_bend_value(semitones, bend_range=PITCH_BEND_RANGE):
+    """Valeur de pitch bend (-8192..8191) pour un écart en demi-tons"""
+    return max(-8192, min(8191, round(semitones / bend_range * 8192)))
+
+
+def add_clip_envelope(clip, target_id, initial):
+    """Ajoute au clip une enveloppe (comme Live : premier point à -63072000) ; retourne ses Events"""
+    envelopes = clip.find('Envelopes/Envelopes')
+    envelope = ET.SubElement(envelopes, 'ClipEnvelope')
+    envelope.set('Id', str(len(envelopes) - 1))
+    ET.SubElement(ET.SubElement(envelope, 'EnvelopeTarget'), 'PointeeId').set('Value', str(target_id))
+    automation = ET.SubElement(envelope, 'Automation')
+    events = ET.SubElement(automation, 'Events')
+    transform_state = ET.SubElement(automation, 'AutomationTransformViewState')
+    ET.SubElement(transform_state, 'IsTransformPending').set('Value', 'false')
+    ET.SubElement(transform_state, 'TimeAndValueTransforms')
+    ET.SubElement(ET.SubElement(envelope, 'LoopSlot'), 'Value')
+    scroller = ET.SubElement(envelope, 'ScrollerTimePreserver')
+    ET.SubElement(scroller, 'LeftTime').set('Value', '0')
+    ET.SubElement(scroller, 'RightTime').set('Value', '0')
+    add_float_event(events, '-63072000', initial)
     return events
 
 
@@ -772,11 +824,11 @@ def timed_envelope(envelope, note, start):
             for tick, value in envelope_curve(envelope, note['duration'] / note['tick'])]
 
 
-def write_automation(track, target_id, notes, note_points):
-    """Automation d'une piste qui suit ses notes (note_points(note, début, fin) → [(temps, valeur)])
+def automation_points(notes, note_points):
+    """Points d'une courbe qui suit des notes (note_points(note, début, fin) → [(temps, valeur)])
 
     Entre deux notes la valeur est tenue, puis change en marche au début de la note suivante ; les
-    points qui ne changent rien sont retirés. Returns: le nombre de points écrits.
+    points qui ne changent rien sont retirés.
     """
     points = []
     for note, start, end in note_spans(notes):
@@ -792,7 +844,12 @@ def write_automation(track, target_id, notes, note_points):
             simplified[-1] = point  # palier : seul son dernier point compte
             continue
         simplified.append(point)
+    return simplified
 
+
+def write_automation(track, target_id, notes, note_points):
+    """Automation d'une piste qui suit ses notes (cf. automation_points) ; returns: nombre de points"""
+    simplified = automation_points(notes, note_points)
     events = add_automation_envelope(track, target_id)
     add_float_event(events, '0.0', simplified[0][1])  # valeur avant la première note
     for time, value in simplified:
@@ -935,7 +992,11 @@ LIVE_GLIDE_MAX_MS = 10000
 
 
 def configure_glide(device, notes):
-    """Tone portamento : glide du Sampler, durée typique (médiane) des glissements de la piste"""
+    """Tone portamento : glide du Sampler, durée typique (médiane) des glissements de la piste
+
+    Aussi avec les effets de hauteur : un pitch bend qui fait le glissement doit compenser le saut de
+    note des notes en legato au même instant, et Live laisse entendre de légers clics (ALIEN.XM).
+    """
     glides = sorted(note['glide_ms'] for note in notes if note.get('legato') and note.get('glide_ms'))
     if not glides:
         return
@@ -1050,7 +1111,7 @@ def distribute_notes_to_avoid_overlap(merged_notes):
     return tracks
 
 
-def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_pan_automation=False, enable_envelope=False, enable_sample_offset=False, enable_merge_tracks=False):
+def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_pan_automation=False, enable_envelope=False, enable_sample_offset=False, enable_merge_tracks=False, enable_pitch_effects=False):
     """Convertit un fichier XM/MOD en projet Ableton
 
     Args:
@@ -1059,6 +1120,8 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         output_dir: Répertoire de sortie (optionnel)
         enable_pan_automation: Activer les automations de panning (effet 8xx)
         enable_envelope: Enveloppes FT2 (volume, panoramique) dans les automations
+        enable_pitch_effects: Effets de hauteur (glissements, arpeggio, vibrato) en enveloppes de
+            pitch bend dans les clips (le tone portamento reste le glide du Sampler)
         enable_sample_offset: Activer l'effet 9xx (Sample Offset) avec Simpler
     """
 
@@ -1112,7 +1175,7 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
     # Jouer le morceau comme le tracker : ordre de lecture réel, ticks, changements de tempo,
     # longueur réelle des notes (fin du sample, enveloppe, volume, key-off)
     song = play_song(patterns, xm_info['pattern_order'], xm_info['tempo'], xm_info['bpm'],
-                     'mod' if is_mod else 'xm', samples)
+                     'mod' if is_mod else 'xm', samples, xm_info.get('linear_frequencies', True))
     tracks_data = song['tracks']
     tempo_changes = song['tempo_changes']
     minutes, secs = divmod(song['duration_seconds'], 60)
@@ -1263,12 +1326,15 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
                                 bpm=xm_info['bpm'], panning=zone_pan)
 
         # Tone portamento : notes en legato et glide du Sampler
-        configure_glide(track.find('DeviceChain/DeviceChain/Devices')[0], track_info['notes'])
+        device = track.find('DeviceChain/DeviceChain/Devices')[0]
+        configure_glide(device, track_info['notes'])
+        if enable_pitch_effects and any(n['pitch'] or n['pitch_moves'] for n in track_info['notes']):
+            device.find('Globals/PitchBendRange').set('Value', str(PITCH_BEND_RANGE))
 
         # Ajouter les notes MIDI : vélocité = volume du canal au début de la note
         for note in track_info['notes']:
             note['velocity'] = velocity_for(note['volume'])
-        update_midi_clip_notes(track, track_info['notes'], song['segments'])
+        update_midi_clip_notes(track, track_info['notes'], song['segments'], pitch_bend=enable_pitch_effects)
 
         # Automation de volume : changements pendant les notes, enveloppe FT2 avec --envelope
         envelope = track_info['sample'].get('envelope') if enable_envelope else None
@@ -1402,6 +1468,10 @@ SWITCHES DISPONIBLES
                     automations (forme exacte, note par note)
                     Par défaut: désactivé
 
+--pitch-effects     Effets de hauteur (glissements, arpeggio, vibrato) en
+                    enveloppes de pitch bend dans les clips
+                    Par défaut: désactivé
+
 --merge-tracks      Crée une piste de référence "ALL" par instrument
                     Contient toutes les notes fusionnées (sans dédoublons)
                     Piste sans instrument, utile comme référence visuelle
@@ -1437,6 +1507,9 @@ Documentation complète: README.md
                         help='Activer l\'effet 9xx (Sample Offset) avec Simpler. '
                              'Les instruments avec effet 9xx utiliseront Simpler au lieu de Sampler. '
                              'LIMITATION: conversion ping-pong → forward.')
+    parser.add_argument('--pitch-effects', action='store_true',
+                        help='Effets de hauteur (glissements 1xx/2xx/E1x/E2x, arpeggio, vibrato) '
+                             'en enveloppes de pitch bend dans les clips.')
     parser.add_argument('--merge-tracks', action='store_true',
                         help='Mode fusion: créer une piste "All notes" par instrument au lieu des pistes individuelles par canal. '
                              'Détecte automatiquement les chevauchements temporels et crée des pistes auxiliaires si nécessaire.')
@@ -1462,7 +1535,8 @@ Documentation complète: README.md
                                         enable_pan_automation=args.pan_automation,
                                         enable_envelope=args.envelope,
                                         enable_sample_offset=args.sample_offset,
-                                        enable_merge_tracks=args.merge_tracks)
+                                        enable_merge_tracks=args.merge_tracks,
+                                        enable_pitch_effects=args.pitch_effects)
         if success:
             sys.exit(0)
         else:

@@ -253,7 +253,8 @@ def extract_samples_and_patterns(xm_path, samples_dir):
             'tempo': default_tempo or 6,  # Speed (ticks par row) ; 0 invalide → défaut FT2
             'bpm': default_bpm or 125,
             'pattern_order': pattern_order,
-            'song_length': song_length
+            'song_length': song_length,
+            'linear_frequencies': bool(flags & 1),  # table de fréquences linéaire (sinon Amiga)
         }
 
         print(f"\nInfos: {num_instruments} instruments, {num_patterns} patterns, {num_channels} canaux")

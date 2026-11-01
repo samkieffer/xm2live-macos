@@ -14,12 +14,17 @@ Le set joue à 120 BPM, une section après l'autre, zone au niveau du convertiss
   4. vélocité → volume à 35 % (réglage jusqu'à la v2.13) : mêmes vélocités qu'en 1
   5. Glide : PortamentoMode 1 puis 2 ; Do tenu, Ré qui le chevauche, Sol séparé (son qui décroît,
      pour voir si la note qui glisse redémarre le sample)
+  6. Pitch bend (enveloppe de clip), plage 48 : une note tenue, paliers 0, +12, -12, +24, -24, +36, +47
+     demi-tons d'un temps chacun, puis alternance 0 / +7 toutes les 20 ms (comme un arpeggio)
+     (mesuré : Live joue la moitié, sa plage plafonne à 24 ; l'alternance n'est pas lissée)
+  7. Pitch bend, plage 12 : paliers 0, +6, +12, -12
 
 Mesures du 31/10/2026 (Live 12.4.16), reprises dans xm2live.py : vélocité à 100 % = 0,4 dB par pas
 (droite en dB) ; Vel → Vol à a % ajoute a × (22,7 dB - 0,4 dB × (127 - vélocité)) au gain 1 du
 Sampler (à 35 %, la vélocité 127 est donc 14,8 dB sous celle à 100 %) ; zone linéaire ;
 PortamentoMode 2 glisse sans redémarrer le sample (1 le redémarre), aucun des deux ne glisse entre
-notes séparées.
+notes séparées. Mesures du 01/11/2026 : PitchBendRange plafonne à 24 demi-tons (48 → 24, 12 exact),
+marches de pitch bend de 20 ms rendues sans lissage.
 """
 
 import os
@@ -41,7 +46,10 @@ VELOCITIES = [127, 112, 96, 80, 64, 48, 32, 24, 16, 8, 4, 1]
 ZONE_VOLUMES = [ZONE_GAIN, ZONE_GAIN / 2, ZONE_GAIN / 4, ZONE_GAIN / 16]
 DEVICE_DB = [0, -6, -12, -24, -36]
 # Débuts des sections (beats) ; une note dure 1 temps, une toutes les 2 temps
-VEL100_AT, ZONE_AT, DEVICE_AT, VEL35_AT, GLIDE_AT = 0, 26, 36, 48, 74
+VEL100_AT, ZONE_AT, DEVICE_AT, VEL35_AT, GLIDE_AT, BEND48_AT, BEND12_AT = 0, 26, 36, 48, 74, 88, 102
+BEND48_STEPS = [0, 12, -12, 24, -24, 36, 47]
+BEND12_STEPS = [0, 6, 12, -12]
+FAST_STEP = 0.04  # temps (20 ms à 120 BPM)
 GLIDE_NOTES = [(0.0, 1.5, 60), (1.0, 1.0, 62), (3.0, 1.0, 67)]  # (début, durée, note) : Ré chevauche Do
 
 
@@ -55,7 +63,7 @@ def write_wav(path, samples):
 
 def make(out_dir):
     from xm2live import update_sampler_sample, update_midi_clip_notes, add_automation_envelope, \
-        add_float_event, write_tempo, update_track_name
+        add_float_event, write_tempo, update_track_name, add_clip_envelope, pitch_bend_value
     samples_dir = os.path.join(out_dir, 'Samples')
     os.makedirs(samples_dir, exist_ok=True)
     t = np.arange(2 * RATE) / RATE
@@ -98,6 +106,27 @@ def make(out_dir):
     for mode in (1, 2):
         start = GLIDE_AT + (mode - 1) * 6
         track(f'5 glide mode {mode}', pluck_info, [(start + t0, d, n, 127) for t0, d, n in GLIDE_NOTES], portamento=mode)
+
+    def bend_track(name, start, bend_range, steps, fast_until=None):
+        sampler = track(name, tone_info, [(start, len(steps) + (3 if fast_until else 1), 48, 127)])
+        element = builder.tracks.findall('MidiTrack')[-1]
+        sampler.find('Globals/PitchBendRange').set('Value', str(bend_range))
+        clip = element.find('DeviceChain/MainSequencer/ClipTimeable/ArrangerAutomation/Events/MidiClip')
+        target = element.find('DeviceChain/MainSequencer/MidiControllers/ControllerTargets.0').get('Id')
+        events = add_clip_envelope(clip, target, 0)
+        for i, semitones in enumerate(steps[1:], 1):
+            add_float_event(events, start + i, pitch_bend_value(steps[i - 1], bend_range))
+            add_float_event(events, start + i, pitch_bend_value(semitones, bend_range))
+        if fast_until:
+            t, value, last = start + len(steps), 0, pitch_bend_value(steps[-1], bend_range)
+            while t < fast_until:
+                new = pitch_bend_value(7 if value == 0 else 0, bend_range)
+                add_float_event(events, t, last)
+                add_float_event(events, t, new)
+                last, value, t = new, 7 if value == 0 else 0, round(t + FAST_STEP, 6)
+
+    bend_track('6 pitch bend 48', BEND48_AT, 48, BEND48_STEPS, fast_until=BEND48_AT + len(BEND48_STEPS) + 2)
+    bend_track('7 pitch bend 12', BEND12_AT, 12, BEND12_STEPS)
 
     write_tempo(builder.live_set, [(0.0, TEMPO)])
     path = os.path.join(out_dir, 'calibration.als')
@@ -156,6 +185,29 @@ def measure(path):
             rms = np.sqrt(np.mean(chunk ** 2))
             if rms > 1e-4:
                 print(f"    {k * 0.05:5.2f} s  {crossings / 2 / 0.05:6.0f} Hz  {20 * math.log10(rms):6.1f} dB")
+    measure_pitch(x, rate, sec)
+
+
+def measure_pitch(x, rate, sec):
+    """Sections 6 et 7 : hauteur mesurée (demi-tons par rapport au Do 48 à 500 Hz) par palier"""
+    def semitones(start_beat, length_beats):
+        a, b = int(start_beat * sec * rate), int((start_beat + length_beats) * sec * rate)
+        chunk = x[a:b]
+        crossings = np.nonzero(np.diff(np.signbit(chunk)))[0]
+        if len(crossings) < 3:
+            return None
+        freq = (len(crossings) - 1) / 2 / ((crossings[-1] - crossings[0]) / rate)
+        return 12 * math.log2(freq / 500.0)
+
+    print("\nPitch bend, plage 48 (demi-tons attendus → mesurés)")
+    for i, expected in enumerate(BEND48_STEPS):
+        print(f"  {expected:+4d} → {semitones(BEND48_AT + i + 0.25, 0.5):+7.2f}")
+    fast = BEND48_AT + len(BEND48_STEPS)
+    values = [semitones(fast + k * FAST_STEP + 0.005, FAST_STEP - 0.01) for k in range(20)]
+    print("  alternance 0 / +7 toutes les 20 ms :", ' '.join(f"{v:+.1f}" if v is not None else '?' for v in values))
+    print("Pitch bend, plage 12")
+    for i, expected in enumerate(BEND12_STEPS):
+        print(f"  {expected:+4d} → {semitones(BEND12_AT + i + 0.25, 0.5):+7.2f}")
 
 
 def main():

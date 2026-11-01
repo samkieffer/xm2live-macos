@@ -51,10 +51,14 @@ def validate_als(als_path):
     for pointee in root.iter('PointeeId'):
         if int(pointee.get('Value')) not in global_ids:
             issues.append(('erreur', f"Automation orpheline (PointeeId {pointee.get('Value')} introuvable)"))
-    for envelope in root.iter('AutomationEnvelope'):
+    for envelope in root.iter('AutomationEnvelope', 'ClipEnvelope'):
         times = [float(event.get('Time')) for event in envelope.iter('FloatEvent')]
         if any(later < earlier for earlier, later in zip(times, times[1:])):
             issues.append(('erreur', "Automation dont les points ne sont pas dans l'ordre du temps"))
+    for envelope in root.iter('ClipEnvelope'):
+        values = [float(event.get('Value')) for event in envelope.iter('FloatEvent')]
+        if values and not -8192 <= min(values) <= max(values) <= 8191:
+            issues.append(('erreur', f"Pitch bend hors de -8192..8191 ({min(values)}..{max(values)})"))
 
     # 3. Pistes : Id uniques, groupes existants
     tracks = live_set.find('Tracks')

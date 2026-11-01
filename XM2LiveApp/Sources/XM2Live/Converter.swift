@@ -157,6 +157,7 @@ final class Converter: ObservableObject {
         if options.panAutomation { args.append("--pan-automation") }
         if options.sampleOffset { args.append("--sample-offset") }
         if options.envelope { args.append("--envelope") }
+        if options.pitchEffects { args.append("--pitch-effects") }
         if options.mergeTracks { args.append("--merge-tracks") }
         if outputRoot != nil {
             // Cas personnalisé : on passe explicitement le dossier au script.

@@ -6,7 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.16.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+**Status:** Production-ready (Version 2.17.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+
+**v2.17.0 (2026-11-01):** pitch effects (`--pitch-effects`, ticked by default in the app): pitch slides
+1xx/2xx/E1x/E2x/X1x/X2x, arpeggio and vibrato as pitch bend envelopes in the clips, checked tick by
+tick against libopenmpt (`tools/check_pitch.py`); tone portamento stays the Sampler glide (section 7b).
 
 **v2.16.0 (2026-10-31):** FT2 panning envelopes in the pan automation (with `--envelope`, ticked by
 default in the app), 9xx offset fixed (offset × 256 frames, was halved), 900 reuses the last offset,
@@ -114,6 +118,9 @@ python3 tools/check_collection.py --jobs 8
 
 # Song flow and tempo, row by row, against libopenmpt (~25 s for the collection)
 python3 tools/check_timing.py --jobs 8
+
+# Pitch effects tick by tick against libopenmpt, on generated modules
+python3 tools/check_pitch.py
 
 # Validate any generated set (also runs automatically at the end of each conversion)
 python3 als_validator.py path/to/project.als
@@ -360,6 +367,34 @@ the note). In Live (`set_levels()`, `velocity_for()`, `create_volume_automation(
 Measurements: `tools/live_calibration.py` (set to open in Live, export, analysis), 2026-10-31 on Live
 12.4.16. Redo them after a Live update.
 
+### 7a. Pitch Effects (v2.17.0, `--pitch-effects`)
+
+`replayer.py` keeps an FT2 period per channel (linear table: 64 units per semitone; Amiga table and
+MOD: frequency ∝ 1/period; XM slide units ×4, MOD ×1) and gives each note `pitch` (semitones above
+its MIDI note at its start) and `pitch_moves` (changes, per tick):
+- 1xx / 2xx per tick, E1x / E2x and X1x / X2x (extra fine) on the note's tick, XM effect memories
+- tone portamento (3xx, 5xy, volume column Fx) is not in the pitch moves: a legato note starts at
+  its own period (keeping the vibrato position) and the Sampler glide does the slide (section 7b)
+- vibrato (4xy, 6xy, E4x waveform): FT2 `(table × depth) >> 5` (ProTracker `>> 7`), first half
+  lowers the pitch; kept on tick 0 of a continuing row in FT2, reset in ProTracker
+- arpeggio (0xy): FT2 counts ticks backwards (note, +y, +x), ProTracker forwards (note, +x, +y)
+- XM `linear_frequencies` (header flag) chooses the table
+
+In Live (`write_pitch_bend()`): one pitch bend `ClipEnvelope` per clip on the track's
+`MainSequencer/MidiControllers/ControllerTargets.0` (structure copied from a set saved by Live 12.4),
+values -8192..8191 over `Globals/PitchBendRange` = 24 semitones (`PITCH_BEND_RANGE`: measured, Live caps
+the range at 24, a setting of 48 plays half; deviations beyond two octaves are clamped: 1,123 notes in 13
+files of the collection, mostly long slides; 20 ms steps are rendered without smoothing).
+
+Tone portamento was in the pitch bend at first (exact FT2 slide, glide at 0.1 ms): it clicked in Live
+(ALIEN.XM, heard 2026-11-01). Each legato note changes the MIDI key (an octave on ALIEN) while the
+pitch bend jumps back by the same amount at the same time, and Live does not apply both at the same
+instant. Do not put it back in the pitch bend without merging legato chains into one MIDI note.
+
+Checked tick by tick against libopenmpt on generated modules (linear XM, Amiga XM, MOD):
+`tools/check_pitch.py`, 11 cases within 0.05 semitone. Note: OpenMPT plays MODs at the Amiga PAL rate
+(period 428 = 8287 Hz), 0.16 semitone below the 8363 Hz used by FT2 and the converter.
+
 ### 7b. Tone Portamento (v2.14.0)
 
 A note played with 3xx, 5xy or volume column Fx while the channel sounds does not retrigger: it
@@ -414,7 +449,10 @@ module rendered in stereo (balance within 0.01).
 - **Volume floor:** the device volume stops at -36 dB below the note's start: fades and gates dip to
   -36 dB, not to silence (a note still ends at its last silence)
 - **S3M/IT formats:** NOT supported - only XM and MOD
-- **Tone portamento:** one glide time per track (Live has one per device); the slide speed varies in FT2
+- **Tone portamento:** Sampler glide, one glide time per track (Live has one per device), also with
+  `--pitch-effects` (section 7a)
+- **Not converted:** glissando control (E3x), tremolo (7xy, 2 files) and tremor (Txy), instrument
+  auto-vibrato (54 XM files), vibrato from the volume column (Sx/Vx, 2 cells)
 - **Key-off with an instrument number on the same cell (41 cells in the collection):** treated as a
   key-off; FT2 might reset the volume instead
 - **Kxx (key-off at tick xx):** not handled (unused in the collection)
@@ -599,7 +637,8 @@ Test files that demonstrate specific features (the regression set is tools/regre
 
 ## Version History Summary
 
-**v2.16.0 (Current)** - Panning envelopes, 9xx offset fixed
+**v2.17.0 (Current)** - Pitch effects as clip pitch bend
+**v2.16.0** - Panning envelopes, 9xx offset fixed
 **v2.15.0** - One clip per run of patterns
 **v2.14.0** - Lot 4 of AUDIT.md: calibrated velocity, volume automation, envelopes, tone portamento glide
 **v2.13.0** - Lot 3 of AUDIT.md: .als assembled from Live-saved fragments, buildable removed

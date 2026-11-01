@@ -229,6 +229,72 @@ def pan_commands(cell, file_format, memory):
     return value, column, slide
 
 
+# Hauteur : comme FT2, chaque canal a une période. Table linéaire (XM) : 64 unités par demi-ton, la
+# période baisse quand la note monte ; table Amiga (XM) et MOD : la fréquence est inverse à la période.
+# Les glissements XM avancent de 4 unités par pas de paramètre, ceux du MOD d'une.
+VIBRATO_SINE = [0, 24, 49, 74, 97, 120, 141, 161, 180, 197, 212, 224, 235, 244, 250, 253,
+                255, 253, 250, 244, 235, 224, 212, 197, 180, 161, 141, 120, 97, 74, 49, 24]
+LINEAR_C4_PERIOD = 4608      # période linéaire de la note 60 (C-4)
+AMIGA_XM_C4_PERIOD = 1712    # période Amiga XM de la note 60 (4 × celle du MOD)
+
+
+def note_period(note, file_format, linear):
+    """Période de la note MIDI `note` (sans finetune : seuls les écarts entre périodes comptent)"""
+    if file_format == 'xm' and linear:
+        return LINEAR_C4_PERIOD - (note - 60) * 64
+    base = AMIGA_XM_C4_PERIOD if file_format == 'xm' else AMIGA_C2_PERIOD
+    return base * 2 ** (-(note - 60) / 12.0)
+
+
+def period_semitones(period, base, file_format, linear):
+    """Écart en demi-tons de la période `period` par rapport à la période `base`"""
+    if file_format == 'xm' and linear:
+        return (base - period) / 64.0
+    return 12 * math.log2(base / max(period, 1))
+
+
+def pitch_commands(cell, sub_effect, file_format, memory):
+    """Hauteur d'une case : (glissement fin au tick de la case, glissement par tick, vibrato, arpeggio)
+
+    En unités de période (négatif = plus aigu) : 1xx / 2xx par tick, E1x / E2x et X1x / X2x (XM, extra
+    fins) au tick de la case ; un paramètre nul reprend le précédent en XM (une mémoire par effet).
+    Vibrato : True pour 4xy / 6xy (vitesse et profondeur mémorisées). Arpeggio : (x, y) pour 0xy.
+    """
+    scale = 4 if file_format == 'xm' else 1
+    xm = file_format == 'xm'
+    fine, slide, vibrato, arpeggio = 0, 0, False, None
+
+    def remembered(key, value):
+        if xm:
+            value = value or memory[key]
+            memory[key] = value
+        return value
+
+    if cell.effect == 0x1:
+        slide = -remembered('porta_up', cell.param) * scale
+    elif cell.effect == 0x2:
+        slide = remembered('porta_down', cell.param) * scale
+    elif sub_effect == 0x1:
+        fine = -remembered('fine_porta_up', cell.param & 0xF) * scale
+    elif sub_effect == 0x2:
+        fine = remembered('fine_porta_down', cell.param & 0xF) * scale
+    elif xm and cell.effect == 33 and cell.param >> 4 in (1, 2):
+        key = 'xfine_up' if cell.param >> 4 == 1 else 'xfine_down'
+        fine = remembered(key, cell.param & 0xF) * (-1 if cell.param >> 4 == 1 else 1)
+    elif cell.effect in (0x4, 0x6):
+        vibrato = True
+        if cell.effect == 0x4:
+            if cell.param >> 4:
+                memory['vib_speed'] = cell.param >> 4
+            if cell.param & 0xF:
+                memory['vib_depth'] = cell.param & 0xF
+    elif sub_effect == 0x4:
+        memory['vib_wave'] = cell.param & 0x7
+    elif cell.effect == 0x0 and cell.param:
+        arpeggio = (cell.param >> 4, cell.param & 0xF)
+    return fine, slide, vibrato, arpeggio
+
+
 def tone_portamento(cell, file_format, memory):
     """Vitesse brute du tone portamento d'une case, None si la case n'en fait pas
 
@@ -267,7 +333,7 @@ def sample_offset(cell, memory):
     return memory['offset']
 
 
-def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
+def play_song(patterns, pattern_order, speed, bpm, file_format, samples=(), linear_frequencies=True):
     """Joue le morceau et produit les notes par canal et par instrument
 
     Args:
@@ -277,13 +343,16 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
         file_format: 'xm' ou 'mod' (formule de vélocité, mémoire des effets, panning 8xx en XM)
         samples: samples des parsers (longueur, boucle, accordage, volume, enveloppe, fadeout) ;
             sans eux, les notes durent jusqu'à l'événement suivant de leur canal
+        linear_frequencies: table de fréquences de l'XM (False : table Amiga) ; sans effet en MOD
 
     Returns:
         dict avec 'tracks' {canal: {instrument: [notes]}} (une note : time, duration, note, tick (durée
         d'un tick en temps), volume 0-64 au début de la note (fondu d'entrée : le plus haut atteint),
         volume_moves [(temps, volume)] et pan 0-255 / pan_moves [(temps, pan)] : changements pendant
-        la note, legato et glide_ms (tone portamento : la note prolonge le son de la précédente en
-        glissant vers sa hauteur, durée du glissement en ms), sample_offset_xm),
+        la note, pitch (demi-tons au-dessus de la note au début) et pitch_moves [(temps, demi-tons)]
+        (glissements, arpeggio, vibrato), legato et glide_ms (tone portamento : la note prolonge le
+        son de la précédente en glissant vers sa hauteur, durée du glissement en ms ; le glide du
+        Sampler fait ce glissement, il n'est pas dans pitch_moves), sample_offset_xm),
         'tempo_changes' [(temps, BPM Live)],
         'end_time' (temps), 'segments' [(début, fin, numéro de pattern)] (chaque passage d'un ordre de
         lecture, dans l'ordre joué), 'duration_seconds', 'released_instruments' (instruments dont un key-off
@@ -314,7 +383,19 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
     pan = {}
     pan_moves = defaultdict(list)  # canal -> [(temps, panoramique)] à chaque changement
     memory = defaultdict(lambda: {'slide': 0, 'fine_up': 0, 'fine_down': 0, 'pan_slide': 0, 'porta': 0,
-                                  'offset': 0})
+                                  'offset': 0, 'porta_up': 0, 'porta_down': 0, 'fine_porta_up': 0,
+                                  'fine_porta_down': 0, 'xfine_up': 0, 'xfine_down': 0,
+                                  'vib_speed': 0, 'vib_depth': 0, 'vib_wave': 0})
+
+    # Hauteur de chaque canal : période réelle (glissements), période de la note MIDI en cours
+    # (référence des écarts), vibrato ; pitch_moves garde l'écart en demi-tons par rapport à la note
+    # à chaque changement
+    period, base_period = {}, {}
+    vibrato_pos = defaultdict(int)
+    pitch_out = defaultdict(float)
+    temporary = {}  # canal -> 'arpeggio' ou 'vibrato' : décalage en cours, à effacer au tick 0
+    pitch_moves = defaultdict(list)
+    period_limits = (1, 32000) if file_format == 'xm' else (113, 856)
     loop_start = defaultdict(int)  # E6x : ligne de début de boucle, par canal
     loop_count = defaultdict(int)
     released_instruments = {}
@@ -345,6 +426,34 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
         if pan.get(channel, 128) != value:
             pan[channel] = value
             pan_moves[channel].append((at, value))
+
+    def emit_pitch(channel, at, offset):
+        if abs(offset - pitch_out[channel]) > 1e-9:
+            pitch_out[channel] = offset
+            pitch_moves[channel].append((at, offset))
+
+    def pitch_offset(channel, vibrato_delta=0, arpeggio_semitones=0):
+        if channel not in period:
+            return 0.0
+        return (period_semitones(period[channel] + vibrato_delta, base_period[channel], file_format, linear_frequencies)
+                + arpeggio_semitones)
+
+    def vibrato_delta(channel, advance=True):
+        """Écart de période du vibrato à sa position (0-255 : sinus, rampe ou carré), puis avance
+
+        FT2 : (forme × profondeur) >> 5, en unités de période XM ; ProTracker : >> 7. La première
+        moitié du cycle allonge la période (le son descend d'abord).
+        """
+        position = vibrato_pos[channel] & 0xFF
+        index = (position >> 2) & 0x1F
+        wave = memory[channel]['vib_wave'] & 3
+        amplitude = VIBRATO_SINE[index] if wave == 0 else (index << 3) if wave == 1 else 255
+        if wave == 1 and position >= 128:
+            amplitude = 255 - amplitude
+        delta = (amplitude * memory[channel]['vib_depth']) >> (5 if file_format == 'xm' else 7)
+        if advance:
+            vibrato_pos[channel] += memory[channel]['vib_speed'] << 2
+        return -delta if position >= 128 else delta
 
     def slide_volume(channel, delta, at):
         """Glissement de volume de `delta` (borné à 0-64)"""
@@ -399,6 +508,14 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
 
         # 2. Notes, volumes et arrêts de chaque canal, effets de déroulé
         jump_order, break_row, loop_row = None, None, None
+        for channel in list(temporary):
+            cell = row_cells[channel] if channel < len(row_cells) else None
+            # FT2 garde le vibrato au tick 0 d'une ligne où il continue ; ProTracker revient à la note
+            continues = (file_format == 'xm' and cell is not None and temporary[channel] == 'vibrato'
+                         and cell.effect in (0x4, 0x6))
+            if not continues:
+                del temporary[channel]
+                emit_pitch(channel, time, pitch_offset(channel))
         for channel, cell in enumerate(row_cells):
             if cell is None:
                 continue
@@ -428,12 +545,16 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
             at = time + delay * tick
             fine, column_slide, effect_slide = volume_commands(cell, sub_effect, file_format, memory[channel])
             pan_value, pan_column_slide, pan_effect_slide = pan_commands(cell, file_format, memory[channel])
+            pitch_fine, pitch_slide, vibrato, arpeggio = pitch_commands(cell, sub_effect, file_format, memory[channel])
             # ECx : volume à 0 au tick x (FT2 et ProTracker coupent le son en mettant le volume à 0)
             cut = param & 0xF if sub_effect == 0xC and (param & 0xF) < speed else None
 
+            pitch_active = bool(pitch_slide or vibrato or arpeggio)
+
             def run_ticks(first, last):
-                """Glissements par tick (sauf le tick 0 de chaque répétition de la ligne) et ECx"""
-                if not (column_slide or effect_slide or pan_column_slide or pan_effect_slide or cut is not None):
+                """Glissements par tick (sauf le tick 0 de chaque répétition de la ligne), ECx, hauteur"""
+                if not (column_slide or effect_slide or pan_column_slide or pan_effect_slide or cut is not None
+                        or pitch_active):
                     return
                 for t in range(first, last):
                     if t % speed:
@@ -442,8 +563,26 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                         if pan_column_slide or pan_effect_slide:
                             set_pan(channel, pan.get(channel, 128) + pan_column_slide + pan_effect_slide,
                                     time + t * tick)
+                        if pitch_active and channel in period:
+                            pitch_tick(t)
                     if t == cut:
                         set_level(channel, 0, time + t * tick)
+
+            def pitch_tick(t):
+                """Hauteur au tick t : glissement, puis vibrato ou arpeggio par-dessus"""
+                low, high = period_limits
+                if pitch_slide:
+                    period[channel] = max(low, min(high, period[channel] + pitch_slide))
+                if vibrato:
+                    temporary[channel] = 'vibrato'
+                    emit_pitch(channel, time + t * tick, pitch_offset(channel, vibrato_delta(channel)))
+                elif arpeggio:
+                    temporary[channel] = 'arpeggio'
+                    # FT2 compte les ticks à rebours : (speed - t) % 3 ; ProTracker : t % 3
+                    phase = ((speed - t % speed) if file_format == 'xm' else t % speed) % 3
+                    emit_pitch(channel, time + t * tick, pitch_offset(channel, 0, (0, arpeggio[0], arpeggio[1])[phase]))
+                else:
+                    emit_pitch(channel, time + t * tick, pitch_offset(channel))
 
             run_ticks(1, delay)  # avant une note retardée, les glissements agissent sur la précédente
 
@@ -483,6 +622,17 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                 level[channel] = new_level
                 playing[channel] = instrument
                 last_note[channel] = cell.note
+                # Hauteur : la note repart de sa période. En tone portamento, le glide du Sampler fait
+                # le glissement (xm2live.py : un pitch bend qui compense le saut de note de Live
+                # claque) et la note garde la position du vibrato du son qu'elle prolonge
+                new_period = note_period(cell.note, file_format, linear_frequencies)
+                period[channel] = new_period
+                if glide_ms is None and not memory[channel]['vib_wave'] & 4:
+                    vibrato_pos[channel] = 0
+                base_period[channel] = new_period
+                temporary.pop(channel, None)
+                pitch_out[channel] = pitch_offset(channel)
+                pitch_moves[channel].append((at, pitch_out[channel]))
                 note = {
                     'kind': 'note',
                     'time': at,
@@ -495,6 +645,7 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                     'peak': 0,
                     'pan': pan.get(channel, 128),
                     'glide_ms': glide_ms,
+                    'pitch': pitch_out[channel],
                     'sample_offset_xm': sample_offset(cell, memory[channel]),
                 }
                 events[channel].append(note)
@@ -506,6 +657,11 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
 
             if fine:
                 slide_volume(channel, fine, at)
+            if pitch_fine and channel in period:
+                period[channel] = max(period_limits[0], min(period_limits[1], period[channel] + pitch_fine))
+                emit_pitch(channel, at, pitch_offset(channel))
+            if vibrato and temporary.get(channel) == 'vibrato' and file_format == 'xm':
+                emit_pitch(channel, at, pitch_offset(channel, vibrato_delta(channel, advance=False)))
             run_ticks(delay, row_ticks)
 
         # 3. Avancer
@@ -555,6 +711,8 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
         move_times = [m[0] for m in moves]
         volumes = sorted(volume_moves[channel], key=lambda m: m[0])
         volume_times = [m[0] for m in volumes]
+        pitches = sorted(pitch_moves[channel], key=lambda m: m[0])
+        pitch_times = [m[0] for m in pitches]
         legato = {}  # index d'une note en tone portamento -> fin naturelle du son qu'elle prolonge
         for i, event in enumerate(channel_events):
             if event['kind'] != 'note':
@@ -597,6 +755,10 @@ def play_song(patterns, pattern_order, speed, bpm, file_format, samples=()):
                 'duration': duration,
                 'pan': event['pan'],
                 'pan_moves': moves[first:last],
+                # au tick de la note, le dernier écart (glissement fin) est celui de départ
+                'pitch': ([value for t, value in pitches[bisect_left(pitch_times, event['time']):
+                                                             bisect_right(pitch_times, event['time'])]] or [event['pitch']])[-1],
+                'pitch_moves': pitches[bisect_right(pitch_times, event['time']):bisect_left(pitch_times, end)],
                 'legato': i in legato,
                 'glide_ms': event['glide_ms'] if i in legato else None,
                 'sample_offset_xm': event['sample_offset_xm'],

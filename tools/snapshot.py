@@ -126,6 +126,10 @@ def summarize(als_path):
                     notes.append([round(float(note.get('Time')), 6), round(float(note.get('Duration')), 6),
                                   key, int(note.get('Velocity'))])
             entry['notes'] = sorted(notes)
+            bends = [(e.get('Time'), e.get('Value')) for e in track.iter('FloatEvent')
+                     if e.getparent().getparent().getparent().tag == 'ClipEnvelope']
+            if bends:
+                entry['pitch_bend'] = [len(bends), hashlib.md5(repr(bends).encode()).hexdigest()[:12]]
             entry['clips'] = sorted([round(float(c.find('CurrentStart').get('Value')), 6),
                                      round(float(c.find('CurrentEnd').get('Value')), 6), value(c, 'Name')]
                                     for c in track.iter('MidiClip'))
@@ -175,7 +179,7 @@ def diff_summaries(old, new):
     for key in sorted(old_tracks.keys() & new_tracks.keys()):
         a, b = old_tracks[key], new_tracks[key]
         track_lines = []
-        for field in ('type', 'group', 'device', 'amp_envelope', 'clips'):
+        for field in ('type', 'group', 'device', 'amp_envelope', 'clips', 'pitch_bend'):
             # Un champ absent de la référence (ancien format d'instantané) n'est pas comparé
             if field in a and a[field] != b.get(field):
                 track_lines.append(f"{field}: {a.get(field)} → {b.get(field)}")

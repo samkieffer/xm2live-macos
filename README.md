@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.16.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes + Portamento ; voir CHANGELOG.md et AUDIT.md)
+**Version actuelle : 2.17.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes + Portamento ; voir CHANGELOG.md et AUDIT.md)
 
 ## 🎵 Fonctionnalités
 
@@ -21,6 +21,7 @@ Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MO
 - 🔇 **Volume 00 (Note Stop)** - Les volumes 00 raccourcissent automatiquement les notes (XM + MOD effet C00)
 - 🎛️ **Enveloppes** - Forme exacte des enveloppes de volume et de panoramique FT2 dans les automations (avec `--envelope`, coché par défaut dans l'app)
 - 🎢 **Tone portamento** - Notes en legato et glide du Sampler, sans redémarrer le sample
+- 🎚️ **Effets de hauteur** - Glissements, arpeggio et vibrato en pitch bend dans les clips (`--pitch-effects`)
 - 🧱 **Clips par patterns** - Un clip par suite de patterns où la piste joue, nommé d'après ses patterns
 - 🎨 **Organisation** - Groupes par instrument, couleurs par canal
 - 🔊 **Monophonie** - 1 voix par sampler (comportement tracker)
@@ -286,7 +287,7 @@ et de l'app).
 
 - [ ] Support format S3M (ScreamTracker 3)
 - [ ] Support format IT (Impulse Tracker)
-- [ ] Conversion du vibrato et de l'arpeggio
+- [ ] Vibrato automatique des instruments (LFO du Sampler), trémolo
 - [ ] Interface graphique (GUI)
 - [ ] Mode --force pour reconvertir les fichiers existants
 - [ ] Export des métadonnées (nom module, commentaires)
