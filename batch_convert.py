@@ -89,6 +89,7 @@ def batch_convert(directory, template_path=None, recursive=True, enable_pan_auto
 
     # Statistiques
     success_count = 0
+    invalid_count = 0  # sets écrits, avec des erreurs de validation
     error_count = 0
     skipped_count = 0
     errors = []
@@ -147,7 +148,11 @@ def batch_convert(directory, template_path=None, recursive=True, enable_pan_auto
                                            enable_sample_offset=enable_sample_offset,
                                            enable_pitch_effects=enable_pitch_effects)
 
-            if success:
+            if success and not success['valid']:
+                invalid_count += 1
+                errors.append((file_name, "Set écrit, mais avec des erreurs de validation"))
+                print(f"\n⚠️  [{i}/{len(files)}] Conversion terminée, erreurs de validation")
+            elif success:
                 success_count += 1
                 print(f"\n✅ [{i}/{len(files)}] Conversion réussie!")
             else:
@@ -182,6 +187,8 @@ def batch_convert(directory, template_path=None, recursive=True, enable_pan_auto
     print(f"{'='*70}")
     print(f"Fichiers traités: {len(files)}")
     print(f"  ✅ Conversions réussies: {success_count}")
+    if invalid_count > 0:
+        print(f"  ⚠️  Sets avec erreurs de validation: {invalid_count}")
     if skipped_count > 0:
         print(f"  ⏭️  Fichiers ignorés (déjà convertis): {skipped_count}")
     if error_count > 0:
@@ -212,7 +219,7 @@ def batch_convert(directory, template_path=None, recursive=True, enable_pan_auto
         print(f"✅ {success_count} fichier(s) converti(s) avec succès!")
         print(f"\n💡 Les projets sont dans les sous-répertoires 'Conversions Ableton Live'")
 
-    return error_count == 0
+    return error_count == 0 and invalid_count == 0
 
 
 def main():

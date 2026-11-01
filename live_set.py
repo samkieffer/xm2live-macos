@@ -41,9 +41,16 @@ def load_als(path):
 
 
 def save_als(root, path):
-    """Écrit un .als (XML gzippé)"""
-    with gzip.open(path, 'wb', compresslevel=6) as f:
-        f.write(etree.tostring(root, xml_declaration=True, encoding='UTF-8'))
+    """Écrit un .als (XML gzippé) d'un coup : dans un fichier temporaire, puis à la place de l'ancien,
+    pour qu'une conversion interrompue ne laisse jamais un set à moitié écrit"""
+    temporary = os.path.join(os.path.dirname(path) or '.', f".{os.path.basename(path)}.tmp")
+    try:
+        with gzip.open(temporary, 'wb', compresslevel=6) as f:
+            f.write(etree.tostring(root, xml_declaration=True, encoding='UTF-8'))
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def set_value(element, path, value):

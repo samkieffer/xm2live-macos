@@ -28,6 +28,7 @@ PROJECT_DIR = os.path.dirname(TOOLS_DIR)
 sys.path.insert(0, PROJECT_DIR)
 
 from als_validator import load_als, validate_als, is_global_id_element  # noqa: E402
+from xm2live import EXIT_INVALID_SET  # noqa: E402
 
 DEFAULT_ROOT = os.environ.get('XM2LIVE_MODULES', os.path.expanduser('~/Music/Compo/All Compo/Modules'))
 
@@ -51,7 +52,7 @@ def convert(module_path, flags, output_dir):
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=PROJECT_DIR)
     stem = os.path.splitext(os.path.basename(module_path))[0]
     als_path = os.path.join(output_dir, f"{stem}.als")
-    if result.returncode != 0 or not os.path.exists(als_path):
+    if result.returncode not in (0, EXIT_INVALID_SET) or not os.path.exists(als_path):
         return None, result.stdout + result.stderr
     return als_path, result.stdout
 

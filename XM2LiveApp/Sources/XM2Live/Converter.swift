@@ -1,6 +1,14 @@
 import Foundation
 import Combine
 
+/// Résultat de la dernière conversion d'un fichier, affiché sur sa ligne.
+enum FileStatus {
+    case ok          // set écrit et valide
+    case invalid     // set écrit, mais le validateur y trouve des erreurs (code de sortie 3)
+    case failed      // la conversion a échoué
+    case skipped     // le projet existait déjà, laissé tel quel
+}
+
 @MainActor
 final class Converter: ObservableObject {
     @Published var log: String = ""
@@ -8,21 +16,26 @@ final class Converter: ObservableObject {
     @Published var progressText = ""
     /// Dossiers des projets Ableton effectivement produits lors de la dernière conversion.
     @Published var outputDirs: [URL] = []
+    /// Python utilisé pour les conversions, vérifié au lancement (checkPython).
+    @Published var python: PythonStatus = .checking
+    /// Résultat de la dernière conversion, par chemin de fichier (standardizedFileURL.path).
+    @Published var statuses: [String: FileStatus] = [:]
+    /// Fichier en cours de conversion (même clé que `statuses`).
+    @Published var currentFile: String?
 
     private var task: Task<Void, Never>?
+    /// Process Python en cours : Annuler l'arrête (SIGTERM, xm2live.py sort proprement).
+    private var currentProcess: Process?
 
     static let supportedExtensions: Set<String> = ["xm", "mod"]
+    /// Code de sortie de xm2live.py quand le set est écrit avec des erreurs de validation (EXIT_INVALID_SET).
+    static let invalidSetExitCode: Int32 = 3
 
     // MARK: - Localisation de Python et des scripts
 
-    /// Retourne le premier python3 trouvé parmi les emplacements habituels.
-    static func findPython() -> String? {
-        let candidates = [
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3"
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    func checkPython() async {
+        python = .checking
+        python = await Task.detached { PythonStatus.detect() }.value
     }
 
     /// Répertoire contenant xm2live.py : ressources embarquées en priorité,
@@ -64,32 +77,37 @@ final class Converter: ObservableObject {
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
 
+    /// Fichiers à convertir : chaque entrée développée en fichiers, avec ses options. Déduplique
+    /// par chemin (premier gagne) puis trie par nom de fichier.
+    static func plan(items: [InputItem]) -> [(url: URL, options: TrackOptions)] {
+        var seen = Set<String>()
+        var files: [(url: URL, options: TrackOptions)] = []
+        for item in items {
+            for file in expand(urls: [item.url]) where seen.insert(file.standardizedFileURL.path).inserted {
+                files.append((file, item.options))
+            }
+        }
+        return files.sorted { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
+    }
+
     // MARK: - Conversion
 
     func cancel() {
         task?.cancel()
+        if let process = currentProcess, process.isRunning {
+            process.terminate()
+        }
     }
 
-    func run(items: [InputItem], outputRoot: URL?) {
+    /// Convertit `files` ; ceux de `skipping` (projets existants à garder) sont laissés tels quels.
+    func run(files: [(url: URL, options: TrackOptions)], outputRoot: URL?, skipping: Set<URL> = []) {
         guard !isRunning else { return }
-        // Étend chaque entrée en fichiers, en conservant ses options. Déduplique
-        // par chemin (premier gagne) puis trie par nom de fichier.
-        var seen = Set<String>()
-        var files: [(url: URL, options: TrackOptions)] = []
-        for item in items {
-            for file in Converter.expand(urls: [item.url]) {
-                if seen.insert(file.standardizedFileURL.path).inserted {
-                    files.append((file, item.options))
-                }
-            }
-        }
-        files.sort { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
         guard !files.isEmpty else {
             appendLine("⚠️  Aucun fichier .xm ou .mod trouvé dans la sélection.")
             return
         }
-        guard let python = Converter.findPython() else {
-            appendLine("❌ python3 introuvable (cherché dans /opt/homebrew, /usr/local, /usr).")
+        guard case .ready(let python) = python else {
+            appendLine("❌ Python n'est pas prêt : voir le message en haut de la fenêtre.")
             return
         }
         let scriptsDir = Converter.scriptsDirectory()
@@ -101,14 +119,22 @@ final class Converter: ObservableObject {
 
         log = ""
         outputDirs = []
+        statuses = [:]
         isRunning = true
+        appendLine("Python : \(python)")
         task = Task { [weak self] in
             guard let self else { return }
-            var ok = 0, fail = 0
             var produced: [URL] = []
             for (i, entry) in files.enumerated() {
                 if Task.isCancelled { break }
                 let file = entry.url
+                let key = file.standardizedFileURL.path
+                if skipping.contains(file) {
+                    self.statuses[key] = .skipped
+                    self.appendLine("⏭️  \(file.lastPathComponent) : projet existant, gardé tel quel")
+                    continue
+                }
+                self.currentFile = key
                 self.setProgress("Conversion \(i + 1)/\(files.count) — \(file.lastPathComponent)")
                 self.appendLine("\n" + String(repeating: "=", count: 60))
                 self.appendLine("[\(i + 1)/\(files.count)] \(file.lastPathComponent)")
@@ -116,21 +142,33 @@ final class Converter: ObservableObject {
 
                 let args = self.buildArguments(script: script, file: file, options: entry.options, outputRoot: outputRoot)
                 let code = await self.launch(python: python, args: args, workingDir: scriptsDir)
-                if code == 0 {
-                    ok += 1
+                if Task.isCancelled { break }  // interrompu en cours de route : ni réussite ni échec
+                switch code {
+                case 0:
+                    self.statuses[key] = .ok
+                case Converter.invalidSetExitCode:
+                    self.statuses[key] = .invalid
+                default:
+                    self.statuses[key] = .failed
+                }
+                if code == 0 || code == Converter.invalidSetExitCode {
                     produced.append(self.outputProjectDir(for: file, outputRoot: outputRoot))
-                } else {
-                    fail += 1
                 }
             }
             // Ne conserve que les dossiers réellement présents sur le disque.
             let fm = FileManager.default
             self.outputDirs = produced.filter { fm.fileExists(atPath: $0.path) }
+            self.currentFile = nil
+            let counts = Dictionary(grouping: self.statuses.values, by: { $0 }).mapValues(\.count)
+            var summary = "\(counts[.ok] ?? 0) réussite(s)"
+            if let invalid = counts[.invalid] { summary += ", \(invalid) avec erreurs de validation" }
+            summary += ", \(counts[.failed] ?? 0) échec(s)"
+            if let skipped = counts[.skipped] { summary += ", \(skipped) gardé(s) tel(s) quel(s)" }
             self.appendLine("\n" + String(repeating: "=", count: 60))
             if Task.isCancelled {
-                self.appendLine("⏸️  Interrompu — \(ok) réussite(s), \(fail) échec(s).")
+                self.appendLine("⏸️  Interrompu — \(summary).")
             } else {
-                self.appendLine("✅ Terminé — \(ok) réussite(s), \(fail) échec(s) sur \(files.count) fichier(s).")
+                self.appendLine("✅ Terminé — \(summary) sur \(files.count) fichier(s).")
             }
             self.isRunning = false
             self.progressText = ""
@@ -152,6 +190,12 @@ final class Converter: ObservableObject {
             .appendingPathComponent(projectName, isDirectory: true)
     }
 
+    /// Set Live que la conversion de `file` écrit (et remplace s'il existe) : <projet>/<nom>.als
+    func projectFile(for file: URL, outputRoot: URL?) -> URL {
+        outputProjectDir(for: file, outputRoot: outputRoot)
+            .appendingPathComponent(file.deletingPathExtension().lastPathComponent + ".als")
+    }
+
     private func buildArguments(script: URL, file: URL, options: TrackOptions, outputRoot: URL?) -> [String] {
         var args = [script.path, file.path]
         if options.panAutomation { args.append("--pan-automation") }
@@ -169,7 +213,7 @@ final class Converter: ObservableObject {
 
     /// Lance le process et streame stdout+stderr dans le log. Retourne le code de sortie.
     private func launch(python: String, args: [String], workingDir: URL) async -> Int32 {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
+        let code = await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: python)
             process.arguments = args
@@ -200,22 +244,16 @@ final class Converter: ObservableObject {
                 continuation.resume(returning: proc.terminationStatus)
             }
 
-            // Si la tâche Swift est annulée, on tue le process.
-            Task { [weak self] in
-                while process.isRunning {
-                    if Task.isCancelled { process.terminate(); break }
-                    try? await Task.sleep(nanoseconds: 200_000_000)
-                }
-                _ = self
-            }
-
             do {
                 try process.run()
+                currentProcess = process
             } catch {
-                Task { @MainActor [weak self] in self?.appendLine("❌ Échec du lancement: \(error.localizedDescription)") }
+                appendLine("❌ Échec du lancement: \(error.localizedDescription)")
                 continuation.resume(returning: -1)
             }
         }
+        currentProcess = nil
+        return code
     }
 
     // MARK: - Helpers log (toujours sur le main actor)

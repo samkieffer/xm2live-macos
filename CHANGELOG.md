@@ -2,6 +2,28 @@
 
 Historique des versions et modifications du projet.
 
+## [2.18.0] - 2026-11-01
+
+### Ajouté
+- 🛡️ **App : confirmation avant de remplacer un projet existant** (une reconversion remplace le set et
+  ses samples, y compris ce qui y a été retravaillé dans Live) : « Remplacer », « Ignorer les
+  existants » (ne convertit que les autres morceaux) ou « Annuler ».
+- ✅ **App : résultat de chaque morceau dans la liste** : converti, converti avec des erreurs de
+  validation, échec, gardé tel quel ; pour un dossier, le pire de ses fichiers et le détail en
+  infobulle ; indicateur d'activité sur la ligne en cours.
+- 🐍 **App : vérification de Python au lancement** : le premier `python3` qui importe numpy et lxml
+  (Homebrew, `/usr/local/bin`, outils de développement d'Apple, sans passer par `/usr/bin/python3` qui
+  ouvrirait la fenêtre d'installation des outils) ; sinon un message avec la commande d'installation
+  et un bouton « Vérifier ». Convertir reste grisé tant que Python n'est pas prêt.
+- `xm2live.py` sort avec le code 3 quand le set est écrit mais que le validateur y trouve des erreurs
+  (0 : set valide, 1 : échec) ; `batch_convert.py` les compte à part, `check_collection.py` et
+  `snapshot.py` les reconnaissent.
+
+### Corrigé
+- App : « Annuler » arrête la conversion en cours (avant : seulement entre deux fichiers). Le set est
+  écrit dans un fichier temporaire puis mis à la place de l'ancien, et `xm2live.py` sort proprement sur
+  SIGTERM : une conversion interrompue ne laisse jamais un set à moitié écrit.
+
 ## [2.17.0] - 2026-11-01
 
 ### Ajouté

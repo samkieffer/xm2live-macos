@@ -2,7 +2,7 @@
 
 Convertisseur de fichiers modules tracker (FastTracker 2 XM, Amiga ProTracker MOD) vers projets Ableton Live.
 
-**Version actuelle : 2.17.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes + Portamento ; voir CHANGELOG.md et AUDIT.md)
+**Version actuelle : 2.18.0** (support XM + MOD + Volume + Panning + Sample Offset + Enveloppes + Portamento ; voir CHANGELOG.md et AUDIT.md)
 
 ## 🎵 Fonctionnalités
 
@@ -83,6 +83,14 @@ python3 xm2live.py mon_fichier.xm /path/to/template.als
             ├── sample1.wav
             └── sample2.wav
 ```
+
+Une nouvelle conversion du même module **remplace** le set et ses samples, y compris ce qui y a été
+retravaillé dans Live : enregistrez vos versions retravaillées sous un autre nom ou ailleurs. L'app
+demande confirmation avant de remplacer un projet existant (« Remplacer », « Ignorer les existants »
+ou « Annuler »).
+
+**Code de sortie :** 0 set écrit et valide, 1 échec de la conversion, 2 arguments invalides, 3 set
+écrit mais avec des erreurs de validation (détail dans la sortie, lignes ❌).
 
 ### Options avancées
 
@@ -259,6 +267,11 @@ Live : convertir DISCOTEC.XM avec `--sample-offset`, ouvrir le set dans Live, l'
 ### Problème : "No such file … templates/liveset.xml"
 **Solution :** le dossier `templates/` doit rester à côté de `xm2live.py` (il fait partie du dépôt
 et de l'app).
+
+### Problème : l'app signale que Python ou numpy / lxml manquent
+**Solution :** l'app cherche au lancement un `python3` (Homebrew, `/usr/local/bin`, outils de
+développement d'Apple) qui importe numpy et lxml, et affiche la commande d'installation à lancer dans
+le Terminal (bouton « Copier la commande »), puis « Vérifier ».
 
 ### Problème : "KeyError: 'tempo'"
 **Solution :** Fichier XM corrompu ou format non standard. Vérifiez avec un éditeur XM.

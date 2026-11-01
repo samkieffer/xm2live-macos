@@ -10,6 +10,8 @@ struct ContentView: View {
     @State private var dropTargeted = false
     /// Lignes sélectionnées dans la liste (sélection simple ou multiple).
     @State private var selection = Set<URL>()
+    /// Conversion en attente de confirmation : des projets existent déjà et seraient remplacés.
+    @State private var overwrite: OverwritePrompt?
 
     private var items: [InputItem] { model.items }
     private var fileCount: Int { Converter.expand(urls: items.map(\.url)).count }
@@ -17,6 +19,10 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 14) {
             header
+
+            if let problem = converter.python.problem {
+                pythonBanner(problem)
+            }
 
             filesZone
 
@@ -29,9 +35,51 @@ struct ContentView: View {
             ConsoleView(text: converter.log)
         }
         .padding(18)
+        .task { await converter.checkPython() }
+        .alert(overwriteTitle, isPresented: Binding(get: { overwrite != nil }, set: { if !$0 { overwrite = nil } }),
+               presenting: overwrite) { prompt in
+            Button("Remplacer", role: .destructive) {
+                converter.run(files: prompt.files, outputRoot: prompt.outputRoot)
+            }
+            if prompt.existing.count < prompt.files.count {
+                Button("Ignorer les existants") {
+                    converter.run(files: prompt.files, outputRoot: prompt.outputRoot, skipping: prompt.existing)
+                }
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: { prompt in
+            Text(overwriteMessage(prompt))
+        }
     }
 
     // MARK: - Sections
+
+    /// Python manquant ou incomplet : explication, commande à lancer dans le Terminal, nouvelle vérification.
+    private func pythonBanner(_ problem: (message: String, command: String)) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.title3)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(problem.message)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(problem.command)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                HStack {
+                    Button("Copier la commande") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(problem.command, forType: .string)
+                    }
+                    Button("Vérifier") { Task { await converter.checkPython() } }
+                }
+                .controlSize(.small)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
+    }
 
     private var header: some View {
         HStack {
@@ -183,6 +231,7 @@ struct ContentView: View {
                     .lineLimit(1).truncationMode(.middle)
             }
             Spacer()
+            statusView(for: url, isDirectory: isDir)
             // Options de conversion propres à ce morceau (icônes activables).
             HStack(spacing: 1) {
                 ForEach(trackOptionDescriptors) { desc in
@@ -200,6 +249,59 @@ struct ContentView: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+    }
+
+    /// Résultat de la dernière conversion sur une ligne. Dossier : le pire de ses fichiers, le détail
+    /// dans l'infobulle. Pendant la conversion de la ligne : un indicateur d'activité.
+    @ViewBuilder
+    private func statusView(for url: URL, isDirectory: Bool) -> some View {
+        let path = url.standardizedFileURL.path
+        let inLine: (String) -> Bool = { isDirectory ? $0.hasPrefix(path + "/") : $0 == path }
+        let results = converter.statuses.filter { inLine($0.key) }.map(\.value)
+        Group {
+            if let current = converter.currentFile, inLine(current) {
+                ProgressView().controlSize(.mini)
+            } else if let shown = [FileStatus.failed, .invalid, .ok, .skipped].first(where: results.contains) {
+                Image(systemName: Self.statusIcon(shown))
+                    .foregroundStyle(Self.statusColor(shown))
+                    .help(statusHelp(results, isDirectory: isDirectory))
+            }
+        }
+        .frame(width: 18)
+    }
+
+    static func statusIcon(_ status: FileStatus) -> String {
+        switch status {
+        case .ok: return "checkmark.circle.fill"
+        case .invalid: return "exclamationmark.triangle.fill"
+        case .failed: return "xmark.octagon.fill"
+        case .skipped: return "arrow.uturn.forward.circle"
+        }
+    }
+
+    static func statusColor(_ status: FileStatus) -> Color {
+        switch status {
+        case .ok: return .green
+        case .invalid: return .orange
+        case .failed: return .red
+        case .skipped: return .secondary
+        }
+    }
+
+    private func statusHelp(_ results: [FileStatus], isDirectory: Bool) -> String {
+        let labels: [(FileStatus, String)] = [
+            (.ok, "converti"),
+            (.invalid, "converti avec des erreurs de validation (voir le journal)"),
+            (.failed, "échec de la conversion (voir le journal)"),
+            (.skipped, "projet existant gardé tel quel"),
+        ]
+        if !isDirectory, let status = results.first, let label = labels.first(where: { $0.0 == status })?.1 {
+            return label.prefix(1).uppercased() + label.dropFirst()
+        }
+        return labels.compactMap { status, label in
+            let count = results.filter { $0 == status }.count
+            return count > 0 ? "\(count) \(label)" : nil
+        }.joined(separator: "\n")
     }
 
     /// Bouton-icône d'une option pour un morceau : teinté si actif, atténué sinon.
@@ -306,7 +408,7 @@ struct ContentView: View {
                 Button("Convertir") { startConversion() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: [])
-                    .disabled(items.isEmpty || (customOutput && outputRoot == nil))
+                    .disabled(items.isEmpty || (customOutput && outputRoot == nil) || !pythonReady)
             }
         }
     }
@@ -331,8 +433,41 @@ struct ContentView: View {
         selection.removeAll()
     }
 
+    private var pythonReady: Bool {
+        if case .ready = converter.python { return true }
+        return false
+    }
+
+    /// Convertit la liste, après confirmation si des sets existent déjà : une reconversion les
+    /// remplace, avec ce qui y a été retravaillé dans Live.
     private func startConversion() {
-        converter.run(items: model.items, outputRoot: customOutput ? outputRoot : nil)
+        let root = customOutput ? outputRoot : nil
+        let files = Converter.plan(items: model.items)
+        let existing = files.map(\.url).filter {
+            FileManager.default.fileExists(atPath: converter.projectFile(for: $0, outputRoot: root).path)
+        }
+        if existing.isEmpty {
+            converter.run(files: files, outputRoot: root)
+        } else {
+            overwrite = OverwritePrompt(files: files, existing: Set(existing), outputRoot: root)
+        }
+    }
+
+    private var overwriteTitle: String {
+        let count = overwrite?.existing.count ?? 0
+        return count == 1 ? "Ce projet existe déjà" : "\(count) projets existent déjà"
+    }
+
+    private func overwriteMessage(_ prompt: OverwritePrompt) -> String {
+        let names = prompt.existing.map { $0.deletingPathExtension().lastPathComponent + ".als" }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        let shown = names.prefix(6).joined(separator: ", ") + (names.count > 6 ? " et \(names.count - 6) autre(s)" : "")
+        var message = "\(shown) : la conversion remplace le set et ses samples, "
+            + "y compris ce qui y a été modifié et enregistré dans Live."
+        if prompt.existing.count < prompt.files.count {
+            message += " « Ignorer les existants » ne convertit que les autres morceaux."
+        }
+        return message
     }
 
     private func chooseFiles() {
@@ -377,6 +512,13 @@ struct ContentView: View {
         }
         return true
     }
+}
+
+/// Conversion qui remplacerait des projets existants, en attente de la réponse de l'utilisateur.
+struct OverwritePrompt {
+    let files: [(url: URL, options: TrackOptions)]
+    let existing: Set<URL>
+    let outputRoot: URL?
 }
 
 /// Console à défilement automatique vers le bas.

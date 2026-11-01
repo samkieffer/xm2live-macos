@@ -6,7 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 XM2Live converts 1990s tracker music files (FastTracker 2 XM, Amiga ProTracker MOD) to Ableton Live projects. The goal is to preserve the original compositions while enabling modern reworking in Ableton Live.
 
-**Status:** Production-ready (Version 2.17.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+**Status:** Production-ready (Version 2.18.0 — single source: `__version__` in xm2live.py, read by the app build scripts)
+
+**v2.18.0 (2026-11-01):** app: confirmation before replacing an existing project, result of each file
+in the list, Python check at launch (numpy, lxml), Cancel stops the running conversion; `xm2live.py`
+exits with 3 when the set is written with validation errors (`EXIT_INVALID_SET`), sets saved atomically.
 
 **v2.17.0 (2026-11-01):** pitch effects (`--pitch-effects`, ticked by default in the app): pitch slides
 1xx/2xx/E1x/E2x/X1x/X2x, arpeggio and vibrato as pitch bend envelopes in the clips, checked tick by
@@ -122,7 +126,8 @@ python3 tools/check_timing.py --jobs 8
 # Pitch effects tick by tick against libopenmpt, on generated modules
 python3 tools/check_pitch.py
 
-# Validate any generated set (also runs automatically at the end of each conversion)
+# Validate any generated set (also runs automatically at the end of each conversion: xm2live.py
+# then exits with EXIT_INVALID_SET = 3 if it finds errors; 0 valid set, 1 failed conversion)
 python3 als_validator.py path/to/project.als
 
 # Regenerate templates/ after a new Live version: convert DISCOTEC.XM with --sample-offset,
@@ -437,8 +442,9 @@ module rendered in stereo (balance within 0.01).
 
 ## Known Limitations (Accepted, Do Not Fix)
 
-- **Effects:** Most effects (vibrato, arpeggio, etc.) are NOT converted - too complex
-  - Exception: panning (8xx, volume column Cx/Dx/Ex, Pxy) IS converted (section 8)
+- **Effects:** volume, panning (section 8), pitch slides, arpeggio and vibrato (section 7a), tone
+  portamento (section 7b) and sample offset are converted; the rest is listed under "Not converted"
+  - Panning (8xx, volume column Cx/Dx/Ex, Pxy) IS converted (section 8)
   - Exception: Effect 9xx (sample offset) IS supported with `--sample-offset` via Simpler
     - Uses Simpler instead of Sampler (Sample Start is automatable in Simpler)
     - LIMITATION: Simpler doesn't support ping-pong loops (auto-converted to forward)
@@ -637,7 +643,8 @@ Test files that demonstrate specific features (the regression set is tools/regre
 
 ## Version History Summary
 
-**v2.17.0 (Current)** - Pitch effects as clip pitch bend
+**v2.18.0 (Current)** - App: overwrite confirmation, per-file status, Python check, real Cancel
+**v2.17.0** - Pitch effects as clip pitch bend
 **v2.16.0** - Panning envelopes, 9xx offset fixed
 **v2.15.0** - One clip per run of patterns
 **v2.14.0** - Lot 4 of AUDIT.md: calibrated velocity, volume automation, envelopes, tone portamento glide

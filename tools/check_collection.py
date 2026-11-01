@@ -16,6 +16,9 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_DIR)
+
+from xm2live import EXIT_INVALID_SET  # noqa: E402
 DEFAULT_ROOT = os.environ.get('XM2LIVE_MODULES', os.path.expanduser('~/Music/Compo/All Compo/Modules'))
 SKIP_DIRS = {'doubles', 'Copie de DIVERS', 'Conversions Ableton Live', 'xm2live_converted_tracks'}
 
@@ -36,7 +39,7 @@ def check(module_path, flags, work_root):
                                  *flags, '--output', out_dir],
                                 capture_output=True, text=True, cwd=PROJECT_DIR, timeout=300)
         output = result.stdout + result.stderr
-        if result.returncode != 0 or 'Traceback' in output:
+        if result.returncode not in (0, EXIT_INVALID_SET) or 'Traceback' in output:
             tail = [line for line in output.splitlines() if line.strip()][-3:]
             return 'plantage', ' | '.join(tail)
         errors = [line.strip() for line in output.splitlines() if line.strip().startswith('❌')]

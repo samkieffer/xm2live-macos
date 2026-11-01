@@ -7,6 +7,7 @@ en projets Ableton Live (.als)
 
 import sys
 import os
+import signal
 import struct
 import math
 try:
@@ -34,7 +35,11 @@ from live_set import LiveSetBuilder, set_value
 from als_validator import validate_als, print_report
 
 # Source unique de la version (reprise par build_app.sh, make_dmg.sh et --version)
-__version__ = '2.17.0'
+__version__ = '2.18.0'
+
+# Code de sortie quand le set est écrit mais que le validateur y trouve des erreurs (0 : set valide,
+# 1 : échec de la conversion, 2 : arguments invalides, argparse). Lu par l'app et par tools/
+EXIT_INVALID_SET = 3
 
 def update_track_name(track, new_name):
     """Nom d'une piste : UserName (nom donné par l'utilisateur) et EffectiveName (nom affiché).
@@ -1123,6 +1128,10 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
         enable_pitch_effects: Effets de hauteur (glissements, arpeggio, vibrato) en enveloppes de
             pitch bend dans les clips (le tone portamento reste le glide du Sampler)
         enable_sample_offset: Activer l'effet 9xx (Sample Offset) avec Simpler
+
+    Returns:
+        False si la conversion échoue, sinon {'als_path', 'valid'} (valid : le validateur ne trouve
+        pas d'erreur dans le set écrit)
     """
 
     if not os.path.exists(xm_path):
@@ -1396,7 +1405,7 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
 
     # Vérifier la cohérence du set final (IDs, automations, samples, boucles, accordage)
     print(f"\n🔍 Vérification du set...")
-    print_report(als_path, validate_als(als_path))
+    valid = print_report(als_path, validate_als(als_path))
 
     print(f"\n{'='*60}")
     print(f"✓ CONVERSION TERMINÉE")
@@ -1408,7 +1417,7 @@ def convert_xm_to_ableton(xm_path, template_path=None, output_dir=None, enable_p
     print(f"  • {len(samples)} samples extraits")
     print(f"\n💡 Ouvrez le fichier .als dans Ableton Live !")
 
-    return True
+    return {'als_path': als_path, 'valid': valid}
 
 def main():
     import argparse
@@ -1529,18 +1538,21 @@ Documentation complète: README.md
         template_path = None
 
 
+    # Le bouton Annuler de l'app envoie SIGTERM : sortir par SystemExit, comme Ctrl+C, pour que
+    # save_als efface son fichier temporaire
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(1))
+
     try:
-        success = convert_xm_to_ableton(xm_path, template_path,
+        result = convert_xm_to_ableton(xm_path, template_path,
                                         output_dir=args.output,
                                         enable_pan_automation=args.pan_automation,
                                         enable_envelope=args.envelope,
                                         enable_sample_offset=args.sample_offset,
                                         enable_merge_tracks=args.merge_tracks,
                                         enable_pitch_effects=args.pitch_effects)
-        if success:
-            sys.exit(0)
-        else:
+        if not result:
             sys.exit(1)
+        sys.exit(0 if result['valid'] else EXIT_INVALID_SET)
     except KeyboardInterrupt:
         print("\n\n⚠️  Conversion interrompue par l'utilisateur")
         sys.exit(1)
